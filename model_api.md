@@ -119,10 +119,7 @@ UNRECOGNIZED > NEEDS_REVIEW > AI_ESTIMATED > RECOGNIZED
 {
   "requestId": "req_01JEXAMPLE",
   "image": {
-    "objectKey": "uploads/2026/08/31/image-001.webp",
-    "contentType": "image/webp",
-    "width": 1280,
-    "height": 960,
+    "url": "s3://uploads/2026/08/31/image-001.webp",
     "sha256": "72d88f..."
   },
   "inputHint": "AUTO",
@@ -134,9 +131,7 @@ UNRECOGNIZED > NEEDS_REVIEW > AI_ESTIMATED > RECOGNIZED
 | 필드 | 필수 | 설명 |
 | --- | --- | --- |
 | `requestId` | Y | 중복 요청 방지를 위한 서비스 요청 ID |
-| `image.objectKey` | Y | 내부 저장소의 이미지 참조 |
-| `image.contentType` | Y | 허용값: JPEG, PNG, WebP |
-| `image.width`, `image.height` | Y | 업로드 검증 및 전처리에 사용 |
+| `image.url` | Y | 내부 S3저장소의 이미지 참조 |
 | `image.sha256` | Y | 중복 분석 캐시와 무결성 확인 |
 | `inputHint` | Y | `AUTO`, `RECEIPT`, `PRODUCT` 중 하나. 기본은 `AUTO` |
 | `locale` | Y | OCR 언어 및 날짜 형식 해석에 사용 |
