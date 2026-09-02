@@ -7,6 +7,7 @@
 ## 단계별 설계 문서
 
 1. [단계 1: 모델 API 설계](./model_api.md)
+2. [단계 2: 모델 성능 최적화](./model_optimization.md)
 
 ## AI가 해결하는 두 가지 사용자 문제
 
