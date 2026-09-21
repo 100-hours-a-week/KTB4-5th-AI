@@ -1,3 +1,6 @@
+# 오조사마의 AI Wiki
+---
+
 # 다먹자 영수증 분석 AI
 
 영수증 이미지를 PP-OCRv5로 읽고, DB 상품 카탈로그와 로컬 Ollama `gemma4:e2b`로 실제 식품
