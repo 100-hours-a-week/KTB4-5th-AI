@@ -1,4 +1,4 @@
-# 오조사마의 AI Wiki
+# [오조사마의 AI Wiki](https://github.com/100-hours-a-week/KTB4-5th-wiki/wiki/AI-Wiki)
 ---
 
 # 다먹자 영수증 분석 AI
