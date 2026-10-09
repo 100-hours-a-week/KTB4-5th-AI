@@ -1,4 +1,6 @@
 # 다먹자 AI 서비스
+# [오조사마의 AI Wiki](https://github.com/100-hours-a-week/KTB4-5th-wiki/wiki/AI-Wiki)
+---
 
 하나의 저장소 안에서 배포 대상을 두 폴더로 분리한다.
 
