@@ -1,0 +1,14 @@
+{
+  "version": "mobilenetv3-small-input-type-v1",
+  "classes": [
+    "OTHER",
+    "PRODUCT",
+    "RECEIPT"
+  ],
+  "input_size": [
+    224,
+    224
+  ],
+  "normalization": "imagenet",
+  "sha256": "f527594c57221d3b91832c54ffcf59ff53a3f706b14e065e40151d344644d15e"
+}

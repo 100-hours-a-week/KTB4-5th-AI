@@ -5,22 +5,26 @@
 __pycache__/
 *.py[cod]
 *.pem
+*.onnx
+*.pt
+*.pth
 .DS_Store
 logs/
-var/log/
-var/run/
-var/uploads/*
-!var/uploads/.gitkeep
-tests/*
-test/*
+fastapi/var/log/
+fastapi/var/run/
+fastapi/var/uploads/*
+!fastapi/var/uploads/.gitkeep
 
-# 런타임 코드가 전혀 참조하지 않는 실험·벤치마크·배포 스크립트 산출물 — 로컬에는 남겨두되
-# git에는 안 올린다.
-benchmarks/*
-results/*
-deploy/*
+# 배포용 저장소에는 테스트·실험 결과·학습용 파일을 포함하지 않는다.
+fastapi/tests/
+runpod/tests/
+fastapi/results/
+fastapi/docs/results/
+fastapi/docs/experiment.md
+fastapi/docs/load_accuracy_test_*.md
+runpod/training/
 
 # database/seed_product_catalog_public.py --input <원본 xlsx>로 재생성 가능한 대량 생성
 # 파일(51MB, 238,817행). 원본 엑셀(200MB)도 같은 이유로 커밋하지 않는다 — docs/database.md
 # 참고. 나머지 seed_data(마이그레이션이 직접 참조하는 작은 CSV·SQL)는 그대로 커밋한다.
-database/seed_data/product_catalog_public_seed.csv
+fastapi/database/seed_data/product_catalog_public_seed.csv
