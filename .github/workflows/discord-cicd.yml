@@ -1,0 +1,195 @@
+name: Discord CI-CD 결과 알림
+
+on:
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+
+# 완료된 작업 메타데이터와 로그만 읽고 저장소 코드는 실행하지 않는다.
+permissions:
+  actions: read
+
+jobs:
+  notify:
+    if: >-
+      github.event.workflow_run.event == 'push' ||
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 실패 단계와 배포 결과를 Discord에 전달
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_AI_WEBHOOK_URL }}
+          DISCORD_USER_MAP: ${{ secrets.DISCORD_USER_MAP }}
+          NOTIFY_SUCCESS: ${{ vars.DISCORD_NOTIFY_SUCCESS }}
+          PART: ai
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          """완료된 GitHub Actions 결과를 읽고 Discord로 전달한다. 외부 코드는 실행하지 않는다."""
+          import json
+          import os
+          import re
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler
+
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+
+          def api(path, logs=False):
+              url = os.environ["GITHUB_API_URL"] + path
+              request = Request(url, headers={
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                  "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+              })
+              if logs:
+                  # 서명된 로그 다운로드 URL로 GitHub 토큰이 전달되지 않게 한다.
+                  try:
+                      with build_opener(NoRedirect).open(request, timeout=20) as response:
+                          return response.read(8_000_000).decode("utf-8", "replace")
+                  except HTTPError as error:
+                      if error.code != 302:
+                          raise
+                      location = error.headers["Location"]
+                      if not location.startswith("https://"):
+                          raise ValueError("로그 다운로드 URL 오류") from None
+                  with urlopen(location, timeout=20) as response:
+                      return response.read(8_000_000).decode("utf-8", "replace")
+              with urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+
+          DEPLOY_STEPS = ("Task Definition 등록", "Service 갱신 후 완료 대기")
+
+
+          def rollback_status(log):
+              # ECS deployment circuit breaker가 이전 Task Definition으로 되돌린다.
+              lines = {re.sub(r"^\d{4}-\d\d-\d\dT\S+\s+", "", line).strip()
+                       for line in log.splitlines()}
+              if "배포 실패. ECS 이벤트:" in lines:
+                  return "ECS 자동 롤백 — 실행 로그의 ECS 이벤트 확인"
+              return "확인 불가 — 실행 로그 확인 필요"
+
+
+          def targets(mapping, part):
+              users = []
+              for entry in mapping.values():
+                  if isinstance(entry, dict) and entry.get("part") == part:
+                      value = str(entry.get("discord_id", ""))
+                      if re.fullmatch(r"[0-9]{15,22}", value) and value not in users:
+                          users.append(value)
+              return users
+
+
+          def payload(run, jobs, part, rollback, users, success_enabled=False):
+              if run.get("event") not in ("push", "pull_request"):
+                  return None
+              failed = [job for job in jobs if job.get("conclusion") in ("failure", "timed_out", "action_required", "startup_failure")]
+              # AI는 CLOUD ecs-deploy.yml(ECS)로 배포한다.
+              deployment = [job for job in jobs if any(step.get("name") in DEPLOY_STEPS for step in job.get("steps", []))]
+              deploy_failed = any(job in failed for job in deployment)
+              success = run.get("conclusion") == "success"
+              if success and not (success_enabled and any(job.get("conclusion") == "success" for job in deployment)):
+                  return None
+              if not success and run.get("conclusion") not in ("failure", "timed_out", "action_required", "startup_failure"):
+                  return None
+              stage = [f"{job['name']} / {step['name']}" for job in failed
+                       for step in job.get("steps", []) if step.get("conclusion") in ("failure", "timed_out")]
+              stage_text = "\n".join(stage or [job["name"] for job in failed]) or "상세 조회 불가 — 실행 로그 확인"
+              branch = run.get("head_branch") or "알 수 없음"
+              environment = "PR 검증" if run["event"] == "pull_request" else {"main": "dev"}.get(branch, branch)
+              if part == "cloud":
+                  environment = "인프라 검사"
+              ping = users[:50] if deploy_failed else []
+              urgent = deploy_failed and rollback.startswith("실패")
+              title = "✅ 배포 성공" if success else ("🚨 긴급: 배포·롤백 실패" if urgent else ("🔴 배포 실패" if deploy_failed else "🔴 CI 실패"))
+              return {
+                  "content": " ".join(f"<@{user}>" for user in ping),
+                  "allowed_mentions": {"parse": [], "users": ping},
+                  "embeds": [{"title": f"{part.upper()} {title}", "url": run["html_url"],
+                              "color": 3066993 if success else 15158332,
+                              "fields": [
+                                  {"name": "환경 / 브랜치", "value": f"{environment} / {branch}"[:1024]},
+                                  {"name": "워크플로", "value": str(run["name"])[:1024]},
+                                  {"name": "커밋 / 실행 회차", "value": f"{run['head_sha'][:12]} / {run.get('run_attempt', 1)}"},
+                                  {"name": "결과" if success else "실패 단계", "value": "배포 완료" if success else stage_text[:1024]},
+                                  {"name": "롤백", "value": rollback if deploy_failed else "해당 없음"},
+                              ]}],
+              }
+
+
+          def post(webhook, message):
+              if not re.fullmatch(r"https://discord\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+", webhook):
+                  raise ValueError("Discord 웹훅 Secret 확인 필요")
+              for attempt in range(3):
+                  request = Request(webhook + "?wait=true", data=json.dumps(message).encode(),
+                                    headers={"Content-Type": "application/json", "User-Agent": "Damuckja-CICD/1.0"}, method="POST")
+                  try:
+                      with urlopen(request, timeout=15):
+                          return
+                  except HTTPError as error:
+                      if error.code == 429 and attempt < 2:
+                          try:
+                              delay = float(json.loads(error.read()).get("retry_after", 2))
+                          except (ValueError, TypeError):
+                              delay = 2
+                          time.sleep(min(max(delay, 1), 15))
+                          continue
+                      raise RuntimeError(f"Discord 전송 실패: HTTP {error.code}") from None
+                  except (URLError, TimeoutError, OSError):
+                      raise RuntimeError("Discord 연결 실패") from None
+
+
+          def main():
+              with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
+                  event = json.load(source)
+              run = event["workflow_run"]
+              if run.get("event") not in ("push", "pull_request"):
+                  return
+              repo = os.environ["GITHUB_REPOSITORY"]
+              jobs, page = [], 1
+              # 재실행에서는 이전 회차의 실패·롤백 로그를 섞지 않는다.
+              path = f"/repos/{repo}/actions/runs/{int(run['id'])}/attempts/{int(run.get('run_attempt', 1))}/jobs"
+              try:
+                  while True:
+                      batch = api(f"{path}?per_page=100&page={page}")["jobs"]
+                      jobs.extend(batch)
+                      if len(batch) < 100:
+                          break
+                      page += 1
+              except Exception:
+                  print("::warning::작업 상세 조회 실패. 실행 결과만 알립니다.")
+              rollback = "확인 불가 — 실행 로그 확인 필요"
+              for job in jobs:
+                  if run["event"] == "push" and job.get("conclusion") in ("failure", "timed_out") and any(
+                      step.get("name") in DEPLOY_STEPS for step in job.get("steps", [])
+                  ):
+                      try:
+                          rollback = rollback_status(api(f"/repos/{repo}/actions/jobs/{int(job['id'])}/logs", logs=True))
+                      except Exception:
+                          print("::warning::롤백 로그 조회 실패. 결과를 추측하지 않습니다.")
+              part = os.environ["PART"]
+              try:
+                  mapping = json.loads(os.environ.get("DISCORD_USER_MAP") or "{}")
+                  users = targets(mapping, part)
+              except (ValueError, AttributeError):
+                  print("::warning::사용자 매핑 오류. 멘션 없이 알립니다.")
+                  users = []
+              message = payload(run, jobs, part, rollback, users, os.environ.get("NOTIFY_SUCCESS") == "true")
+              if message:
+                  post(os.environ.get("DISCORD_WEBHOOK_URL", ""), message)
+
+
+          if __name__ == "__main__":
+              # 비밀값이 포함될 수 있는 원본 예외·로그는 출력하지 않는다.
+              try:
+                  main()
+              except Exception:
+                  print("::error::Discord 결과 알림 실패. Secrets 및 API 권한을 확인하세요.")
+                  raise SystemExit(1) from None
+          PY
