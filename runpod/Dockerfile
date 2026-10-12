@@ -24,7 +24,7 @@ COPY models ./models
 COPY start.sh ./start.sh
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install 'torch==2.13.0' 'torchvision==0.28.0' --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT}" \
+    && python -m pip install 'torch==2.6.0' 'torchvision==0.21.0' --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT}" \
     && python -m pip install '.[yolo]' 'paddleocr>=3,<4' 'onnxruntime>=1.20,<2' \
     && (python -m pip uninstall -y paddlepaddle paddlepaddle-gpu >/dev/null 2>&1 || true)
 RUN python -m pip install 'paddlepaddle-gpu==3.3.0' \

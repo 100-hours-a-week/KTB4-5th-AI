@@ -8,7 +8,7 @@ if [[ -x .venv/bin/python ]]; then
     export PATH="$project_dir/.venv/bin:$PATH"
 fi
 
-if [[ -f .env ]]; then
+if [[ -f .env && "${LOAD_DOTENV:-true}" == "true" ]]; then
     set -a
     # shellcheck disable=SC1091
     source .env
