@@ -152,7 +152,9 @@ class RemoteInferenceClient:
         try:
             import boto3
 
-            client = boto3.client("s3", region_name=self._settings.s3_region)
+            region = self._settings.s3_region
+            endpoint_url = f"https://s3.{region}.amazonaws.com" if region else None
+            client = boto3.client("s3", region_name=region, endpoint_url=endpoint_url)
             return client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._settings.s3_bucket, "Key": object_key},
