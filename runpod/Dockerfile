@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OLLAMA_MODELS=/workspace/ollama
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 zstd \
+    && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 libgomp1 zstd \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="${OLLAMA_VERSION}" sh
 
