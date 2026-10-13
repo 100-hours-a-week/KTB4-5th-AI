@@ -259,6 +259,22 @@ app/
 | `GET` | `/health/live` | 프로세스 생존 확인 |
 | `GET` | `/health/ready` | 모델 포함 준비 상태 확인 |
 
+결과 조회의 `items[].reviewReasons`는 프론트가 문자열을 해석하지 않고 확인 대상 필드를 바로
+표시할 수 있도록 `field`, 안정적인 분기 코드인 `code`, 사용자 표시 문구 배열인 `messages`로
+구성한다. 예시는 다음과 같다.
+
+```json
+{
+  "field": "EXPIRATION",
+  "code": "EXPIRATION_NOT_FOUND",
+  "messages": ["영수증에서 확정 가능한 소비기한을 찾지 못했습니다."]
+}
+```
+
+완료 콜백의 `items[].reviewReasons`도 결과 조회와 동일한
+`{field, code, messages}` 객체 배열로 전달한다. 백엔드는 별도 조회 없이 콜백만으로
+항목별 확인 사유를 저장하고 프론트엔드에 전달할 수 있다.
+
 `inputHint=PRODUCT`는 실물 경로를 사용한다. `remote`(GPU Worker)에서는 YOLO-World 검출 + Gemma
 비전으로 포장 상품을 판별하고(`source=VISION`), `local`에서는 OCR·카탈로그만 쓴다. 바코드와 비포장
 단일 식재료 시각 분류는 아직 없으므로, 그런 사진은 근거 없이 상품을 임의 생성하지 않는다.

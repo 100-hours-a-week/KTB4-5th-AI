@@ -40,6 +40,34 @@ class DisplayStatus(StrEnum):
     AI_ESTIMATED = "AI_ESTIMATED"
 
 
+class ReviewField(StrEnum):
+    ITEM = "ITEM"
+    NAME = "NAME"
+    CATEGORY = "CATEGORY"
+    STORAGE_TYPE = "STORAGE_TYPE"
+    MEASURE_TYPE = "MEASURE_TYPE"
+    QUANTITY = "QUANTITY"
+    WEIGHT = "WEIGHT"
+    EXPIRATION = "EXPIRATION"
+    IMAGE = "IMAGE"
+
+
+class ReviewReasonCode(StrEnum):
+    ITEM_REVIEW_REQUIRED = "ITEM_REVIEW_REQUIRED"
+    IMAGE_QUALITY_REVIEW_REQUIRED = "IMAGE_QUALITY_REVIEW_REQUIRED"
+    EXPIRATION_NOT_FOUND = "EXPIRATION_NOT_FOUND"
+    EXPIRATION_ESTIMATED = "EXPIRATION_ESTIMATED"
+    EXPIRATION_BASIS_FALLBACK = "EXPIRATION_BASIS_FALLBACK"
+    QUANTITY_DEFAULTED = "QUANTITY_DEFAULTED"
+    CATEGORY_FUZZY_MATCHED = "CATEGORY_FUZZY_MATCHED"
+
+
+class ReviewReason(BaseModel):
+    field: ReviewField
+    code: ReviewReasonCode
+    messages: list[NonBlank] = Field(min_length=1)
+
+
 class Category(StrEnum):
     VEGETABLE = "VEGETABLE"
     FRUIT = "FRUIT"
@@ -160,9 +188,7 @@ class EstimatedDateRange(BaseModel):
 
 class ExpirationValue(BaseModel):
     date: Date | None = None
-    date_type: Literal["USE_BY", "UNKNOWN", "ESTIMATED_CONSUMPTION_WINDOW"] = Field(
-        default="UNKNOWN", alias="dateType"
-    )
+    date_type: Literal["USE_BY", "UNKNOWN", "ESTIMATED_CONSUMPTION_WINDOW"] = Field(default="UNKNOWN", alias="dateType")
     source: Source | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     evidence_text: str | None = Field(default=None, alias="evidenceText")
@@ -183,7 +209,7 @@ class ReceiptItem(BaseModel):
     quantity: QuantityValue | None
     weight: WeightValue
     expiration: ExpirationValue
-    review_reasons: list[str] = Field(default_factory=list, alias="reviewReasons")
+    review_reasons: list[ReviewReason] = Field(default_factory=list, alias="reviewReasons")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -257,6 +283,7 @@ class CallbackItem(BaseModel):
     quantity: int | None = Field(ge=1, le=100)
     weight: CallbackWeight
     expiration: CallbackExpiration
+    review_reasons: list[ReviewReason] = Field(default_factory=list, alias="reviewReasons")
 
     model_config = ConfigDict(populate_by_name=True)
 

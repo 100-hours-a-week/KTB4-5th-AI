@@ -88,6 +88,7 @@ def _callback_item(item: ReceiptItem) -> CallbackItem:
             dateType=item.expiration.date_type,
             estimatedRange=item.expiration.estimated_range,
         ),
+        reviewReasons=item.review_reasons,
     )
 
 

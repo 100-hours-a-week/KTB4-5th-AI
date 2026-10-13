@@ -52,6 +52,9 @@ from app.schemas import (
     ModelTrace,
     QuantityValue,
     ReceiptItem,
+    ReviewField,
+    ReviewReason,
+    ReviewReasonCode,
     Source,
     SourcedString,
     WeightValue,
@@ -316,10 +319,7 @@ class ReceiptAnalysisPipeline:
                 for line in build_food_candidate_lines(safe_lines)
                 if line.line_no not in reconstructed_line_numbers
                 and known_food_category(line.text) is not None
-                and (
-                    re.search(r"(?<!\d)\d{1,3}(?:,\d{3})+(?!\d)", line.text)
-                    or re.search(r"미원|와플|브라우니|케익|케이크", line.text, re.I)
-                )
+                and (re.search(r"(?<!\d)\d{1,3}(?:,\d{3})+(?!\d)", line.text) or re.search(r"미원|와플|브라우니|케익|케이크", line.text, re.I))
             ]
             classification_lines.extend(supplemental_lines)
             supplemental_rows = build_supplemental_receipt_rows(
@@ -653,11 +653,31 @@ class ReceiptAnalysisPipeline:
         )
         expiration_date, expiration_evidence = parse_expiration(expiration_text or original_text, datetime.now(UTC).date())
         storage_type = storage_for_category(selected_line.category.value)
-        reasons = ["현재 실물 분석 결과는 사용자 확인이 필요합니다." if document_type == "PRODUCT" else "현재 영수증 모델은 사용자 확인이 필요합니다."]
+        reasons = [
+            ReviewReason(
+                field=ReviewField.ITEM,
+                code=ReviewReasonCode.ITEM_REVIEW_REQUIRED,
+                messages=["현재 실물 분석 결과는 사용자 확인이 필요합니다." if document_type == "PRODUCT" else "현재 영수증 모델은 사용자 확인이 필요합니다."],
+            )
+        ]
+        if image_needs_review:
+            reasons.append(
+                ReviewReason(
+                    field=ReviewField.IMAGE,
+                    code=ReviewReasonCode.IMAGE_QUALITY_REVIEW_REQUIRED,
+                    messages=["이미지 품질 문제로 분석 결과를 확인해야 합니다."],
+                )
+            )
         expiration_extra: dict = {}
         expiration_was_estimated = False
         if expiration_date is None:
-            reasons.append("실물 이미지에서 확정 가능한 소비기한을 찾지 못했습니다." if document_type == "PRODUCT" else "영수증에서 확정 가능한 소비기한을 찾지 못했습니다.")
+            reasons.append(
+                ReviewReason(
+                    field=ReviewField.EXPIRATION,
+                    code=ReviewReasonCode.EXPIRATION_NOT_FOUND,
+                    messages=["실물 이미지에서 확정 가능한 소비기한을 찾지 못했습니다." if document_type == "PRODUCT" else "영수증에서 확정 가능한 소비기한을 찾지 못했습니다."],
+                )
+            )
             expiration_extra = await self._estimate_expiration(
                 normalized,
                 storage_type,
@@ -668,15 +688,45 @@ class ReceiptAnalysisPipeline:
             )
             if expiration_extra:
                 expiration_was_estimated = True
-                reasons.append(f"표시된 소비기한이 없어 보관 조건을 기준으로 예상했습니다. 출처: {expiration_extra.pop('source_name')}")
+                reasons.append(
+                    ReviewReason(
+                        field=ReviewField.EXPIRATION,
+                        code=ReviewReasonCode.EXPIRATION_ESTIMATED,
+                        messages=[f"표시된 소비기한이 없어 보관 조건을 기준으로 예상했습니다. 출처: {expiration_extra.pop('source_name')}"],
+                    )
+                )
                 if document_type == "PRODUCT":
-                    reasons.append("구매일·제조일을 확인할 수 없어 분석일 기준의 참고 범위이며 확정 소비기한이 아닙니다.")
+                    reasons.append(
+                        ReviewReason(
+                            field=ReviewField.EXPIRATION,
+                            code=ReviewReasonCode.EXPIRATION_BASIS_FALLBACK,
+                            messages=["구매일·제조일을 확인할 수 없어 분석일 기준의 참고 범위이며 확정 소비기한이 아닙니다."],
+                        )
+                    )
                 elif estimation_basis:
-                    reasons.append("구매일을 확인할 수 없어 분석일 기준의 참고 범위이며 확정 소비기한이 아닙니다.")
+                    reasons.append(
+                        ReviewReason(
+                            field=ReviewField.EXPIRATION,
+                            code=ReviewReasonCode.EXPIRATION_BASIS_FALLBACK,
+                            messages=["구매일을 확인할 수 없어 분석일 기준의 참고 범위이며 확정 소비기한이 아닙니다."],
+                        )
+                    )
         if measure_evidence is None:
-            reasons.append("수량 표기가 없어 1개를 기본 후보로 제안했습니다.")
+            reasons.append(
+                ReviewReason(
+                    field=ReviewField.QUANTITY,
+                    code=ReviewReasonCode.QUANTITY_DEFAULTED,
+                    messages=["수량 표기가 없어 1개를 기본 후보로 제안했습니다."],
+                )
+            )
         if selected_line.reason == "catalog_fuzzy":
-            reasons.append("카테고리는 정확히 일치하지 않고 유사한 상품명을 기준으로 추정했습니다.")
+            reasons.append(
+                ReviewReason(
+                    field=ReviewField.CATEGORY,
+                    code=ReviewReasonCode.CATEGORY_FUZZY_MATCHED,
+                    messages=["카테고리는 정확히 일치하지 않고 유사한 상품명을 기준으로 추정했습니다."],
+                )
+            )
 
         # 승인된 보관기간 규칙으로 날짜 범위만 추정한 경우는 API 명세대로 AI_ESTIMATED다.
         # 단, 이미지 품질 문제나 퍼지 카탈로그 매칭은 더 높은 검토 우선순위를 가져 NEEDS_REVIEW를 유지한다.
