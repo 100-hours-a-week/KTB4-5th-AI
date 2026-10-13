@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     OLLAMA_HOST=127.0.0.1:11434 \
-    OLLAMA_MODELS=/workspace/ollama
+    OLLAMA_MODELS=/workspace/ollama \
+    DOTENV_FILE=/workspace/runpod.env
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 zstd \
