@@ -8,8 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     OLLAMA_HOST=127.0.0.1:11434 \
-    OLLAMA_MODELS=/workspace/ollama \
-    DOTENV_FILE=/workspace/runpod.env
+    OLLAMA_MODELS=/workspace/ollama
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 zstd \
@@ -31,7 +30,9 @@ RUN python -m pip install --upgrade pip \
 RUN python -m pip install 'paddlepaddle-gpu==3.3.0' \
     --index-url "https://www.paddlepaddle.org.cn/packages/stable/${PADDLE_CUDA_VARIANT}/"
 
-RUN chmod +x start.sh
+# 이미지로 실행하면 리셋마다 컨테이너 디스크가 지워지므로, 볼륨에 있는 기존 .env를 연결한다.
+RUN chmod +x start.sh \
+    && ln -s /workspace/KTB4-5th-AI/runpod/.env /app/.env
 
 EXPOSE 9000
 

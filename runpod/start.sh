@@ -8,12 +8,10 @@ if [[ -x .venv/bin/python ]]; then
     export PATH="$project_dir/.venv/bin:$PATH"
 fi
 
-# 이미지로 실행할 때는 컨테이너 디스크가 리셋마다 지워지므로 볼륨(/workspace)의 파일을 읽는다.
-dotenv_file="${DOTENV_FILE:-.env}"
-if [[ -f "$dotenv_file" && "${LOAD_DOTENV:-true}" == "true" ]]; then
+if [[ -f .env && "${LOAD_DOTENV:-true}" == "true" ]]; then
     set -a
-    # shellcheck disable=SC1090
-    source "$dotenv_file"
+    # shellcheck disable=SC1091
+    source .env
     set +a
 fi
 
