@@ -1,0 +1,95 @@
+name: RunPod Worker CI-CD
+
+# runpod/(GPU Worker)만 대상. fastapi/는 ai-cicd.yml이 맡는다.
+on:
+  pull_request:
+    branches: [main]
+    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml"]
+  push:
+    branches: [main]
+    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ruff 검사
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: pipx run --spec 'ruff>=0.8,<1' ruff check runpod
+
+  build:
+    name: 이미지 빌드
+    needs: check
+    # 이미지가 10GB가 넘어 PR마다 빌드하지 않고 main 머지 때만 빌드한다.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - name: 러너 디스크 비우기
+        # torch·paddle-gpu 이미지를 빌드하기에 기본 러너 여유 공간이 부족하다.
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: 이미지 이름
+        id: name
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: echo "image=ghcr.io/${REPOSITORY,,}-worker:${SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: runpod
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.name.outputs.image }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  deploy:
+    name: RunPod 배포
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Pod 이미지 교체
+        # 이미지를 바꾸면 RunPod가 Pod를 리셋해 새 이미지로 다시 띄운다. /workspace 볼륨은 유지된다.
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          POD_ID: ${{ vars.RUNPOD_POD_ID }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          curl -fsS -X PATCH "https://rest.runpod.io/v1/pods/${POD_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"imageName\": \"${IMAGE}\"}" > /dev/null
+      - name: Worker 준비 대기
+        # 모델 다운로드·워밍업 때문에 준비까지 몇 분 걸린다.
+        env:
+          POD_ID: ${{ vars.RUNPOD_POD_ID }}
+        run: |
+          for _ in $(seq 1 75); do
+            # 바로 확인하면 리셋 전 이전 Pod가 응답할 수 있어 먼저 기다린다.
+            sleep 20
+            # /health/ready는 준비 전에도 200을 주므로 본문의 ready 값을 본다.
+            if curl -fsS "https://${POD_ID}-9000.proxy.runpod.net/health/ready" | grep -q '"ready":true'; then
+              exit 0
+            fi
+          done
+          echo "Worker가 25분 안에 준비되지 않았습니다." >&2
+          exit 1
