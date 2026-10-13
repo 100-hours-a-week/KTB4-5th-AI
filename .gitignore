@@ -10,10 +10,6 @@ __pycache__/
 *.pth
 .DS_Store
 logs/
-fastapi/var/log/
-fastapi/var/run/
-fastapi/var/uploads/*
-!fastapi/var/uploads/.gitkeep
 
 # 배포용 저장소에는 테스트·실험 결과·학습용 파일을 포함하지 않는다.
 fastapi/tests/

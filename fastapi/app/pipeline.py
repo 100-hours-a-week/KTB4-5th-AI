@@ -9,17 +9,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config import Settings
 from app.domain.models import (
     ClassifiedFoodLine,
-    FoodCandidateClassifier,
-    ImageLoader,
-    InputTypeClassifier,
     OcrLine,
-    PipelineDiagnostics,
     ProductCatalogLookup,
     ProductCatalogMatch,
     ReceiptProductRow,
     RemoteInferenceProvider,
     ShelfLifeLookup,
-    TextExtractor,
 )
 from app.domain.receipt_rules import (
     build_food_candidate_lines,
@@ -37,7 +32,6 @@ from app.domain.receipt_rules import (
     sanitize_lines,
     storage_for_category,
 )
-from app.errors import ModelUnavailable
 from app.schemas import (
     AnalysisResult,
     Category,
@@ -77,9 +71,6 @@ _STRUCTURAL_RECEIPT_MIN_LIKELIHOOD = 0.3
 # 신선식품 전용 소비기한 규칙(shelf_life_rules.fresh_only)을 적용해도 되는 상품 분류.
 _FRESH_CATEGORIES = {Category.VEGETABLE, Category.FRUIT, Category.MEAT, Category.SEAFOOD}
 
-# 배치 분류가 빈 결과일 때 한 줄씩 다시 물어볼 최대 줄 수(한 줄에 Gemma 호출 약 2~4초).
-_MAX_SINGLE_LINE_RETRIES = 8
-
 _CATEGORY_SOURCE_BY_REASON = {
     "keyword_rule": Source.BUSINESS_RULE,
     "catalog": Source.CATALOG,
@@ -114,46 +105,30 @@ _GENERIC_ENGLISH_PRODUCT_WORDS = {
 
 
 class ReceiptAnalysisPipeline:
-    # 설정과 이미지·OCR·식품행 분류·보관기간 조회 포트를 받아 영수증 파이프라인을 구성한다.
+    # 설정과 원격 GPU Worker·보관기간 조회·상품 카탈로그 포트를 받아 영수증 파이프라인을 구성한다.
+    # 이미지 다운로드·입력 유형 분류·OCR·Gemma 추론은 모두 GPU Worker가 맡고, 이 파이프라인은
+    # Worker 결과에 행 복원·카탈로그·업무 규칙을 적용해 서비스 결과로 바꾼다.
     def __init__(
         self,
         settings: Settings,
-        image_loader: ImageLoader,
-        text_extractor: TextExtractor,
-        classifier: FoodCandidateClassifier,
+        remote_inference_provider: RemoteInferenceProvider,
         shelf_life_lookup: ShelfLifeLookup | None = None,
         product_catalog_lookup: ProductCatalogLookup | None = None,
-        input_type_classifier: InputTypeClassifier | None = None,
-        remote_inference_provider: RemoteInferenceProvider | None = None,
     ) -> None:
         self._settings = settings
-        self._image_loader = image_loader
-        self._text_extractor = text_extractor
-        self._classifier = classifier
+        self._remote_inference_provider = remote_inference_provider
         self._shelf_life_lookup = shelf_life_lookup
         self._product_catalog_lookup = product_catalog_lookup
-        self._input_type_classifier = input_type_classifier
-        self._remote_inference_provider = remote_inference_provider
 
-    # OCR과 Ollama 어댑터의 준비 상태를 점검해 이름별 boolean으로 반환한다.
+    # 원격 GPU Worker의 준비 상태를 이름별 boolean으로 반환한다.
     async def readiness(self) -> dict[str, bool]:
-        if self._remote_inference_provider is not None:
-            return {"remoteInference": await self._remote_inference_provider.ready()}
-        readiness = {
-            "ocr": await self._text_extractor.ready(),
-            "ollama": await self._classifier.ready(),
-        }
-        if self._input_type_classifier is not None:
-            readiness["inputClassifier"] = await self._input_type_classifier.ready()
-        return readiness
+        return {"remoteInference": await self._remote_inference_provider.ready()}
 
-    # 분류기·보관기간 조회기·상품 카탈로그 조회기가 close를 제공하면 자원을 비동기로 정리한다.
+    # 보관기간 조회기·상품 카탈로그 조회기·원격 추론 클라이언트가 close를 제공하면 자원을 비동기로 정리한다.
     async def close(self) -> None:
         for closeable in (
-            self._classifier,
             self._shelf_life_lookup,
             self._product_catalog_lookup,
-            self._input_type_classifier,
             self._remote_inference_provider,
         ):
             close = getattr(closeable, "close", None)
@@ -168,94 +143,42 @@ class ReceiptAnalysisPipeline:
         logger.info("pipeline.started " + log_context, record.analysis_id, request.request_id)
         inferred_input_type: str | None = None
         inferred_input_confidence: float | None = None
-        remote_model_candidates: tuple[ClassifiedFoodLine, ...] | None = None
-        remote_diagnostics: PipelineDiagnostics | None = None
 
-        if self._remote_inference_provider is not None:
-            await set_stage(InternalStage.CLASSIFYING)
-            step_started = perf_counter()
-            logger.info("pipeline.remote_inference.started " + log_context, record.analysis_id, request.request_id)
-            bundle = await self._remote_inference_provider.infer(
-                request.image.object_key,
-                request.image.sha256,
-                request.input_hint.value,
-            )
-            document = bundle.document
-            remote_model_candidates = bundle.model_candidates
-            remote_diagnostics = bundle.diagnostics
-            prediction = bundle.input_prediction
-            if prediction is not None and request.input_hint == InputHint.AUTO:
-                inferred_input_type = prediction.document_type if prediction.accepted else None
-                inferred_input_confidence = prediction.confidence if prediction.accepted else None
-            safe_lines = sanitize_lines(document.lines)
-            logger.info(
-                "pipeline.remote_inference.finished " + log_context + " line_count=%s model_candidate_count=%s elapsed_ms=%.2f "
-                "worker_queue_wait_ms=%s download_ms=%s input_classifier_ms=%s ocr_queue_wait_ms=%s ocr_ms=%s "
-                "llm_queue_wait_ms=%s llm_ms=%s worker_total_ms=%s input_classifier_active=%s",
-                record.analysis_id,
-                request.request_id,
-                len(safe_lines),
-                len(remote_model_candidates),
-                (perf_counter() - step_started) * 1000,
-                remote_diagnostics.worker_queue_wait_ms,
-                remote_diagnostics.download_ms,
-                remote_diagnostics.input_classifier_ms,
-                remote_diagnostics.ocr_queue_wait_ms,
-                remote_diagnostics.ocr_ms,
-                remote_diagnostics.llm_queue_wait_ms,
-                remote_diagnostics.llm_ms,
-                remote_diagnostics.worker_total_ms,
-                remote_diagnostics.input_classifier_active,
-            )
-        else:
-            await set_stage(InternalStage.EXTRACTING)
-            step_started = perf_counter()
-            logger.info("pipeline.image_load.started " + log_context, record.analysis_id, request.request_id)
-            image = await self._image_loader.load(request.image.object_key, request.image.sha256)
-            logger.info(
-                "pipeline.image_load.finished " + log_context + " media_type=%s width=%s height=%s elapsed_ms=%.2f",
-                record.analysis_id,
-                request.request_id,
-                image.media_type,
-                image.width,
-                image.height,
-                (perf_counter() - step_started) * 1000,
-            )
-            if request.input_hint == InputHint.AUTO and self._input_type_classifier is not None:
-                await set_stage(InternalStage.CLASSIFYING)
-                step_started = perf_counter()
-                try:
-                    prediction = await self._input_type_classifier.classify(image)
-                    inferred_input_type = prediction.document_type if prediction.accepted else None
-                    inferred_input_confidence = prediction.confidence if prediction.accepted else None
-                    logger.info(
-                        "pipeline.input_classification.finished " + log_context + " prediction=%s confidence=%.3f margin=%.3f accepted=%s elapsed_ms=%.2f",
-                        record.analysis_id,
-                        request.request_id,
-                        prediction.document_type,
-                        prediction.confidence,
-                        prediction.margin,
-                        prediction.accepted,
-                        (perf_counter() - step_started) * 1000,
-                    )
-                except Exception:
-                    logger.exception(
-                        "pipeline.input_classification.failed " + log_context,
-                        record.analysis_id,
-                        request.request_id,
-                    )
-                await set_stage(InternalStage.EXTRACTING)
-            step_started = perf_counter()
-            logger.info("pipeline.ocr.started " + log_context, record.analysis_id, request.request_id)
-            document = await self._text_extractor.extract(image)
-            safe_lines = sanitize_lines(document.lines)
-            logger.info(
-                "pipeline.ocr.finished " + log_context + " line_count=%s elapsed_ms=%.2f",
-                record.analysis_id,
-                request.request_id,
-                len(safe_lines),
-                (perf_counter() - step_started) * 1000,
-            )
+        await set_stage(InternalStage.CLASSIFYING)
+        step_started = perf_counter()
+        logger.info("pipeline.remote_inference.started " + log_context, record.analysis_id, request.request_id)
+        bundle = await self._remote_inference_provider.infer(
+            request.image.object_key,
+            request.image.sha256,
+            request.input_hint.value,
+        )
+        document = bundle.document
+        remote_model_candidates = bundle.model_candidates
+        remote_diagnostics = bundle.diagnostics
+        prediction = bundle.input_prediction
+        if prediction is not None and request.input_hint == InputHint.AUTO:
+            inferred_input_type = prediction.document_type if prediction.accepted else None
+            inferred_input_confidence = prediction.confidence if prediction.accepted else None
+        safe_lines = sanitize_lines(document.lines)
+        logger.info(
+            "pipeline.remote_inference.finished " + log_context + " line_count=%s model_candidate_count=%s elapsed_ms=%.2f "
+            "worker_queue_wait_ms=%s download_ms=%s input_classifier_ms=%s ocr_queue_wait_ms=%s ocr_ms=%s "
+            "llm_queue_wait_ms=%s llm_ms=%s worker_total_ms=%s input_classifier_active=%s",
+            record.analysis_id,
+            request.request_id,
+            len(safe_lines),
+            len(remote_model_candidates),
+            (perf_counter() - step_started) * 1000,
+            remote_diagnostics.worker_queue_wait_ms,
+            remote_diagnostics.download_ms,
+            remote_diagnostics.input_classifier_ms,
+            remote_diagnostics.ocr_queue_wait_ms,
+            remote_diagnostics.ocr_ms,
+            remote_diagnostics.llm_queue_wait_ms,
+            remote_diagnostics.llm_ms,
+            remote_diagnostics.worker_total_ms,
+            remote_diagnostics.input_classifier_active,
+        )
         document_confidence = receipt_likelihood(safe_lines)
         quality = self._image_quality(safe_lines)
         logger.info(
@@ -334,7 +257,7 @@ class ReceiptAnalysisPipeline:
         non_food_count = sum(is_non_food(line.text) or is_receipt_metadata(line.text) for line in classification_lines)
         classification_lines = [line for line in classification_lines if not is_non_food(line.text) and not is_receipt_metadata(line.text)]
         known_selected: list[ClassifiedFoodLine] = []
-        unresolved_lines: list[OcrLine] = []
+        unresolved_line_numbers: set[int] = set()
         for line in classification_lines:
             rule_category = known_food_category(line.text)
             catalog_match = await self._lookup_catalog_category(line.text) if self._product_catalog_lookup is not None else None
@@ -352,7 +275,7 @@ class ReceiptAnalysisPipeline:
                 else:
                     reason = "catalog"
             if resolved is None:
-                unresolved_lines.append(self._with_price_hint(line, rows_by_line_number.get(line.line_no)))
+                unresolved_line_numbers.add(line.line_no)
             else:
                 known_selected.append(
                     ClassifiedFoodLine(
@@ -371,67 +294,25 @@ class ReceiptAnalysisPipeline:
             len(classification_lines),
             non_food_count,
             len(known_selected),
-            len(unresolved_lines),
+            len(unresolved_line_numbers),
         )
-        unresolved_line_numbers = {line.line_no for line in unresolved_lines}
-        if remote_model_candidates is not None:
-            model_selected = [item for item in remote_model_candidates if item.line_no in unresolved_line_numbers]
-            diagnostics = remote_diagnostics or PipelineDiagnostics()
-        else:
-            model_selected, diagnostics = await self._classifier.classify(unresolved_lines)
-            model_selected = [item for item in model_selected if item.line_no in unresolved_line_numbers]
-        hinted_lines = [line for line in unresolved_lines if line.line_no in rows_by_line_number and line.text.endswith("원)")]
-        if remote_model_candidates is None and not model_selected and hinted_lines:
-            # Gemma는 여러 줄을 한 번에 받을 때 그중 한 줄이 애매하면 전부 버리고 {"items":[]}를 돌려주는
-            # 경우가 있다(실측: "소 척아이롤 (수량 1개, 12,900원)"만 넣으면 MEAT로 고르는데, 깨진 줄
-            # "종이 특100원 갑 계"와 같이 넣으면 빈 결과). 좌표로 가격까지 확인된 상품행만 한 줄씩 다시 묻는다.
-            # 호출이 늘어나는 걸 막으려고 배치 결과가 완전히 비었을 때만, 최대 _MAX_SINGLE_LINE_RETRIES줄까지만 한다.
-            for line in hinted_lines[:_MAX_SINGLE_LINE_RETRIES]:
-                retried, _ = await self._classifier.classify([line])
-                model_selected.extend(item for item in retried if item.line_no == line.line_no)
-            logger.info(
-                "pipeline.classification.single_line_retry " + log_context + " retried=%s selected=%s",
-                record.analysis_id,
-                request.request_id,
-                min(len(hinted_lines), _MAX_SINGLE_LINE_RETRIES),
-                len(model_selected),
-            )
+        # 규칙·카탈로그로 정하지 못한 행만 GPU Worker의 Gemma 후보를 쓴다.
+        model_selected = [item for item in remote_model_candidates if item.line_no in unresolved_line_numbers]
         selected = sorted([*known_selected, *model_selected], key=lambda item: item.line_no)
-        fallback_used = False
-        if remote_model_candidates is None and not selected and receipt_rows:
-            # receipt_rows가 비어 있으면 classification_lines가 이미 build_food_candidate_lines
-            # 결과이므로 여기서 다시 만들어도 완전히 같은 입력으로 Gemma를 중복 호출하게 된다.
-            # 좌표 기반 복원이 성공했는데 아무것도 못 골랐을 때만, 아직 시도 안 한 단순 후보로 재시도한다.
-            fallback_lines = [line for line in build_food_candidate_lines(safe_lines) if not is_non_food(line.text) and not is_receipt_metadata(line.text)]
-            if fallback_lines and len(fallback_lines) < len(safe_lines):
-                logger.info(
-                    "pipeline.classification.fallback analysis_id=%s request_id=%s candidate_line_count=%s",
-                    record.analysis_id,
-                    request.request_id,
-                    len(fallback_lines),
-                )
-                selected, fallback_diagnostics = await self._classifier.classify(fallback_lines)
-                fallback_used = True
-                diagnostics.llm_prompt_tokens = fallback_diagnostics.llm_prompt_tokens
-                diagnostics.llm_completion_tokens = fallback_diagnostics.llm_completion_tokens
-                diagnostics.llm_prompt_duration_ns = fallback_diagnostics.llm_prompt_duration_ns
-                diagnostics.llm_eval_duration_ns = fallback_diagnostics.llm_eval_duration_ns
-                diagnostics.llm_load_duration_ns = fallback_diagnostics.llm_load_duration_ns
         logger.info(
             "pipeline.classification.finished analysis_id=%s request_id=%s ocr_lines=%s "
-            "selected=%s fallback_used=%s elapsed_ms=%.2f prompt_tokens=%s "
+            "selected=%s elapsed_ms=%.2f prompt_tokens=%s "
             "completion_tokens=%s prompt_duration_ns=%s eval_duration_ns=%s load_duration_ns=%s",
             record.analysis_id,
             request.request_id,
             len(safe_lines),
             len(selected),
-            fallback_used,
             (perf_counter() - step_started) * 1000,
-            diagnostics.llm_prompt_tokens,
-            diagnostics.llm_completion_tokens,
-            diagnostics.llm_prompt_duration_ns,
-            diagnostics.llm_eval_duration_ns,
-            diagnostics.llm_load_duration_ns,
+            remote_diagnostics.llm_prompt_tokens,
+            remote_diagnostics.llm_completion_tokens,
+            remote_diagnostics.llm_prompt_duration_ns,
+            remote_diagnostics.llm_eval_duration_ns,
+            remote_diagnostics.llm_load_duration_ns,
         )
 
         await set_stage(InternalStage.VALIDATING)
@@ -853,22 +734,6 @@ class ReceiptAnalysisPipeline:
             logger.exception("product_catalog_lookup.failed line_text=%s", line_text)
             return None
 
-    # 좌표 기반으로 복원된 수량·금액이 있으면 Gemma 입력 줄 끝에 힌트로 붙여 반환한다.
-    # "낯선 상표명이라도 가격이 붙어 있으면 구매한 상품"이라는 신호를 준다 — GS25처럼
-    # 사전에 없는 브랜드명(예: "마운틴틀러스트")을 Gemma가 그냥은 못 알아보지만, 실제 가격이
-    # 붙어 있는 줄이라는 걸 알려주면 인식한다(직접 검증). 좌표로 금액이 확인된 행에만 붙여서,
-    # 후보 텍스트뿐인 receipt_rows 미복원 상황(build_food_candidate_lines 폴백)에서는 원문 그대로 둔다.
-    @staticmethod
-    def _with_price_hint(line: OcrLine, row: ReceiptProductRow | None) -> OcrLine:
-        if row is None or row.amount is None:
-            return line
-        # 줄 앞의 "*"(면세)·"#"(영세) 표시는 Gemma가 상품명으로 읽지 못하게 만든다(실측: "*정육"은 제외,
-        # "정육"은 MEAT). 표시 기호는 Gemma에 보내는 문자열에서만 뗀다.
-        name = line.text.lstrip("*#≠ ")
-        # 수량 "1"은 OCR이 자주 놓친다. 금액이 확인됐으면 수량 없이도 힌트를 붙인다.
-        detail = f"수량 {row.quantity}개, {row.amount:,}원" if row.quantity is not None else f"{row.amount:,}원"
-        return OcrLine(line_no=line.line_no, text=f"{name} ({detail})", confidence=line.confidence, box=line.box)
-
     # 영수증 신뢰도와 화질을 받아 OTHER 문서의 빈 분석 결과를 반환한다.
     def _empty_result(self, document_confidence: float, quality: ImageQuality) -> AnalysisResult:
         return AnalysisResult(
@@ -897,16 +762,6 @@ class ReceiptAnalysisPipeline:
         average = sum(line.confidence for line in lines) / len(lines)
         issues = [] if average >= 0.7 else ["LOW_OCR_CONFIDENCE"]
         return ImageQuality(score=max(0.0, min(average, 1.0)), issues=issues)
-
-
-class UnavailableClassifier:
-    # 사용 불가능한 대체 분류기이므로 항상 False를 반환한다.
-    async def ready(self) -> bool:
-        return False
-
-    # 입력 OCR 줄과 무관하게 MODEL_UNAVAILABLE 예외를 발생시킨다.
-    async def classify(self, lines: list[OcrLine]) -> tuple[list[ClassifiedFoodLine], PipelineDiagnostics]:
-        raise ModelUnavailable("Ollama 분류기를 사용할 수 없습니다.")
 
 
 # 공백·기호가 제거된 두 상품명이 철자 한두 글자만 다른 동일 후보인지 반환한다.

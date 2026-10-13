@@ -56,15 +56,6 @@ class ProductCatalogMatch:
     similarity: float | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class LoadedImage:
-    content: bytes
-    media_type: str
-    width: int
-    height: int
-    sha256: str
-
-
 @dataclass(slots=True)
 class PipelineDiagnostics:
     worker_queue_wait_ms: float | None = None
@@ -100,32 +91,6 @@ class RemoteInferenceBundle:
     diagnostics: PipelineDiagnostics
 
 
-class ImageLoader(Protocol):
-    # 객체 키와 해시를 받아 검증된 이미지를 반환한다.
-    async def load(self, object_key: str, expected_sha256: str) -> LoadedImage:
-        ...
-
-
-class TextExtractor(Protocol):
-    # 이미지를 받아 OCR 문서를 반환한다.
-    async def extract(self, image: LoadedImage) -> OcrDocument:
-        ...
-
-    # OCR 준비 여부를 반환한다.
-    async def ready(self) -> bool:
-        ...
-
-
-class InputTypeClassifier(Protocol):
-    # 이미지를 받아 RECEIPT·PRODUCT·OTHER 유형과 임계값 통과 여부를 반환한다.
-    async def classify(self, image: LoadedImage) -> InputTypePrediction:
-        ...
-
-    # 입력 유형 모델 준비 여부를 반환한다.
-    async def ready(self) -> bool:
-        ...
-
-
 class RemoteInferenceProvider(Protocol):
     # 객체 키·해시·입력 힌트를 원격 추론 작업자에 전달하고 한 번의 호출로 추론 묶음을 반환한다.
     async def infer(self, object_key: str, sha256: str, input_hint: str) -> RemoteInferenceBundle:
@@ -137,16 +102,6 @@ class RemoteInferenceProvider(Protocol):
 
     # 재사용 HTTP 연결을 정리한다.
     async def close(self) -> None:
-        ...
-
-
-class FoodCandidateClassifier(Protocol):
-    # OCR 줄을 받아 식품 후보와 진단 정보를 반환한다.
-    async def classify(self, lines: list[OcrLine]) -> tuple[list[ClassifiedFoodLine], PipelineDiagnostics]:
-        ...
-
-    # 분류 모델 준비 여부를 반환한다.
-    async def ready(self) -> bool:
         ...
 
 

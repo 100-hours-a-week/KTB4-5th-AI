@@ -29,6 +29,8 @@ class RemoteInferenceClient:
 
     # 객체 키를 서명 URL로 바꿔 Worker에 보내고 도메인 추론 묶음으로 변환한다.
     async def infer(self, object_key: str, sha256: str, input_hint: str) -> RemoteInferenceBundle:
+        if not self._settings.remote_inference_url:
+            raise DependencyUnavailable("REMOTE_INFERENCE_URL이 설정되지 않아 GPU Worker를 호출할 수 없습니다.")
         image_url = await self._resolve_image_url(object_key)
         payload = {
             "requestId": f"remote_{sha256[:16]}",
@@ -113,6 +115,8 @@ class RemoteInferenceClient:
 
     # Worker의 readiness endpoint가 성공하는지 확인한다.
     async def ready(self) -> bool:
+        if not self._settings.remote_inference_url:
+            return False
         try:
             response = await self._client.get(
                 f"{self._settings.remote_inference_url.rstrip('/')}/health/ready"

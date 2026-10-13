@@ -83,13 +83,12 @@ fastapi/
 │   ├── schemas.py              # 외부 API와 Worker 데이터 계약
 │   ├── store.py                # 인메모리 작업 상태 저장소
 │   ├── routers/                # 분석·헬스·모델 상태 API
-│   ├── adapters/               # Worker, DB, OCR/LLM, 이미지, 콜백 연결부
+│   ├── adapters/               # GPU Worker, DB, 콜백 연결부
 │   ├── domain/                 # 영수증 행 복원과 도메인 규칙
 │   └── logging/                # 비동기 날짜별 로그와 요청 감사 로그
 ├── database/
 │   ├── migrations/             # 상품·소비기한 지식 스키마와 변경 이력
 │   └── seed_data/              # 검수된 기준 데이터
-├── deploy/                     # EC2 서비스 정의와 배포 경계
 └── docs/                       # 아키텍처·DB·운영 상세 문서
 ```
 

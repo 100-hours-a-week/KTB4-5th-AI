@@ -21,6 +21,10 @@ from app.schemas import Category
 
 logger = logging.getLogger(__name__)
 
+# 줄 수로 잡은 출력 예산이 모자라 응답이 잘리면(done_reason=length) 이 예산으로 한 번만 다시 묻는다.
+# 잘린 JSON은 복구 파서가 앞부분 상품만 살려 뒤쪽 상품이 조용히 사라진다(실측: 3줄 중 2개만 반환).
+_TRUNCATED_RETRY_NUM_PREDICT = 2048
+
 
 class _SelectedLine(BaseModel):
     line_no: int = Field(alias="lineNo")
@@ -165,6 +169,17 @@ class OllamaFoodClassifier:
             response = await self._get_client().post("/api/chat", json=payload)
             response.raise_for_status()
             body = response.json()
+            if body.get("done_reason") == "length" and payload["options"]["num_predict"] < _TRUNCATED_RETRY_NUM_PREDICT:
+                logger.warning(
+                    "ollama.classification.truncated line_count=%s num_predict=%s retry_num_predict=%s",
+                    len(lines),
+                    payload["options"]["num_predict"],
+                    _TRUNCATED_RETRY_NUM_PREDICT,
+                )
+                payload["options"]["num_predict"] = _TRUNCATED_RETRY_NUM_PREDICT
+                response = await self._get_client().post("/api/chat", json=payload)
+                response.raise_for_status()
+                body = response.json()
             parsed = self._parse_content(body["message"]["content"])
         except (httpx.HTTPError, KeyError, ValueError, ValidationError) as exc:
             logger.exception("ollama.classification.failed error_type=%s", type(exc).__name__)

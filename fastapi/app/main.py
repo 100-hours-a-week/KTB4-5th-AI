@@ -1,16 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 
 from app.adapters.callback import CallbackDelivery
-from app.adapters.image_loader import ConfiguredImageLoader
-from app.adapters.input_classifier import OnnxMobileNetInputClassifier
-from app.adapters.ocr import PaddleTextExtractor, StubTextExtractor
-from app.adapters.ollama import OllamaFoodClassifier
 from app.adapters.product_catalog import PostgresProductCatalogLookup
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.adapters.shelf_life import PostgresShelfLifeLookup
@@ -24,36 +19,15 @@ from app.runtime import AnalysisRuntime
 from app.store import InMemoryAnalysisStore
 
 
-# 설정을 입력받아 저장소·OCR·LLM·콜백을 조립한 분석 런타임을 반환한다.
+# 설정을 입력받아 저장소·원격 GPU Worker·DB 조회·콜백을 조립한 분석 런타임을 반환한다.
 def build_runtime(settings: Settings) -> AnalysisRuntime:
-    image_loader = ConfiguredImageLoader(settings)
-
-    text_extractor = (
-        PaddleTextExtractor(settings) if settings.ocr_backend == "paddle" else StubTextExtractor()
-    )
-
-    classifier = OllamaFoodClassifier(settings)
     shelf_life_lookup = PostgresShelfLifeLookup(settings) if settings.database_url else None
     product_catalog_lookup = PostgresProductCatalogLookup(settings) if settings.database_url else None
-    classifier_checkpoint_available = Path(settings.input_classifier_model_path).is_file()
-    input_type_classifier = (
-        OnnxMobileNetInputClassifier(settings)
-        if settings.input_classifier_backend == "onnx"
-        or (settings.input_classifier_backend == "auto" and classifier_checkpoint_available)
-        else None
-    )
-    remote_inference_provider = (
-        RemoteInferenceClient(settings) if settings.inference_backend == "remote" else None
-    )
     pipeline = ReceiptAnalysisPipeline(
         settings,
-        image_loader,
-        text_extractor,
-        classifier,
+        RemoteInferenceClient(settings),
         shelf_life_lookup,
         product_catalog_lookup,
-        input_type_classifier,
-        remote_inference_provider,
     )
 
     store = InMemoryAnalysisStore(
