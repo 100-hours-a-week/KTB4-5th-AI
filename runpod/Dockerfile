@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     OLLAMA_HOST=127.0.0.1:11434 \
-    OLLAMA_MODELS=/workspace/ollama
+    OLLAMA_MODELS=/app/.ollama/models
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 libgomp1 zstd \
@@ -22,6 +22,7 @@ COPY app ./app
 COPY gpu_worker ./gpu_worker
 COPY models ./models
 COPY start.sh ./start.sh
+COPY stop.sh restart.sh ./
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install 'torch==2.6.0' 'torchvision==0.21.0' --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT}" \
@@ -31,12 +32,12 @@ RUN python -m pip install 'paddlepaddle-gpu==3.3.0' \
     --index-url "https://www.paddlepaddle.org.cn/packages/stable/${PADDLE_CUDA_VARIANT}/"
 
 # 이미지로 실행하면 리셋마다 컨테이너 디스크가 지워지므로, 볼륨에 있는 기존 .env를 연결한다.
-RUN chmod +x start.sh \
+RUN chmod +x start.sh stop.sh restart.sh \
     && ln -s /workspace/KTB4-5th-AI/runpod/.env /app/.env
 
 EXPOSE 9000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \
-    CMD curl -fsS http://127.0.0.1:9000/health/ready || exit 1
+    CMD curl -fsS http://127.0.0.1:9000/health/ready | grep -q '"ready":true' || exit 1
 
 CMD ["./start.sh"]

@@ -332,9 +332,12 @@ def build_receipt_product_rows(lines: list[OcrLine], image_width: int) -> list[R
         unit_price = _column_integer(tokens, image_width * 0.35, unit_quantity_boundary, anchor_y)
         quantity = _column_integer(tokens, unit_quantity_boundary, quantity_amount_boundary, anchor_y)
         amount = _column_integer(tokens, quantity_amount_boundary, image_width * 1.01, anchor_y)
+        if quantity is not None and not 1 <= quantity <= 100:
+            quantity = None
+        price_quantity = _quantity_from_price(unit_price, amount)
+        if price_quantity is not None and quantity != price_quantity:
+            quantity = price_quantity
         if quantity is None and any(re.fullmatch(r"\[?\d{7,13}\]?", line.text.strip()) for line, _ in tokens):
-            quantity = 1
-        if quantity is None and unit_price is not None and amount == unit_price:
             quantity = 1
         if quantity is None and amount is not None:
             quantity = 1
@@ -392,8 +395,8 @@ def build_supplemental_receipt_rows(
         unit_price = _column_integer(tokens, image_width * 0.35, unit_quantity_boundary, anchor_y)
         quantity = _column_integer(tokens, unit_quantity_boundary, quantity_amount_boundary, anchor_y)
         amount = _column_integer(tokens, quantity_amount_boundary, image_width * 1.01, anchor_y)
-        if quantity is None and unit_price is not None and amount == unit_price:
-            quantity = 1
+        if quantity is None:
+            quantity = _quantity_from_price(unit_price, amount)
         if quantity is None and amount is not None:
             quantity = 1
         rows.append(
@@ -579,6 +582,15 @@ def _column_integer(tokens: list[tuple[OcrLine, tuple[float, float]]], minimum_x
         if line.confidence >= 0.35 and minimum_x <= center_x < maximum_x and re.fullmatch(r"\d{1,3}(?:,\d{3})*", line.text.strip()):
             return int(line.text.replace(",", ""))
     return None
+
+
+# 수량 열 OCR이 빠졌을 때 단가와 금액의 정확한 정수 비율로 1~100개 수량을 복원한다.
+# 가격 할인이 적용된 행은 나누어떨어지지 않으므로 추정하지 않고 기존 기본값 처리에 맡긴다.
+def _quantity_from_price(unit_price: int | None, amount: int | None) -> int | None:
+    if unit_price is None or amount is None or unit_price <= 0 or amount <= 0:
+        return None
+    quantity, remainder = divmod(amount, unit_price)
+    return quantity if remainder == 0 and 1 <= quantity <= 100 else None
 
 
 # OCR 사각형의 평균 세로 길이를 반환해 원근이 있는 영수증의 행 허용 오차 계산에 사용한다.

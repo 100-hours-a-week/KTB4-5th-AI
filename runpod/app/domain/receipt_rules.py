@@ -38,6 +38,9 @@ NON_PRODUCT_KEYWORDS = {
     "CHANGE",
     "CASH",
     "CARD",
+    "CHECK CLOSED",
+    "CHECK OPENED",
+    "BALANCE DUE",
 }
 
 # 상품번호 없는 영수증에서 "같은 행"으로 볼 y좌표 오차(px). GS25 실영수증에서 같은 행의
@@ -52,8 +55,9 @@ KNOWN_FOOD_CATEGORY_RULES = (
     (re.compile(r"바리스타|커피|coffee|coke|sprite|soda|음료|주스|콜라|샘물|생수|워터|water|소주|처음처럼|맥주|와인|수라즈|쉬라즈|까베르네|조니워커|하이네켄|삿포로|아사히|칭타오", re.I), Category.BEVERAGE),
     (
         re.compile(
-            r"젤리|꼬깔콘|포스틱|감자칩|감자원|과자|카스타드|커스터드|custard|lunch|컵누들|비빔면|우동맛|짜파게|라면|피자|콤비네이션|호떡|"
-            r"초코|쿠키|오레오|빼빼로|빼빼롯|마이쮸|마이쯤|츄러스|사탕|쫄병|오사쯔",
+            r"젤리|꼬깔콘|포스틱|감자칩|감자원|과자|카스타드|커스터드|custard|컵누들|비빔면|우동맛|짜파게|라면|피자|콤비네이션|호떡|"
+            r"초코|쿠키|오레오|빼빼로|빼빼롯|마이쮸|마이쯤|츄러스|사탕|쫄병|오사쯔|"
+            r"\b(?:rice|fried|fry|masala|biryani|curry|roll|buffet|dinner|lunch|chips|salsa|tostones)\b",
             re.I,
         ),
         Category.PROCESSED_FOOD,
@@ -107,10 +111,23 @@ NON_FOOD_PATTERN = re.compile(
     r"바디워시|치약|칫솔|면도|건전지|호일|지퍼백|위생장갑|종이컵|나무젓가락|양복커버|종량제|지함|인형|\d+겹"
 )
 
+# 식당 영수증에서 메뉴 아래에 붙는 구성 설명과 주문 마감 문구를 상품 분류 전에 제거한다.
+RECEIPT_METADATA_PATTERN = re.compile(
+    r"\b(?:served\s+with|comes\s+with|choice\s+of|check\s+(?:closed|opened)|balance\s+due)\b",
+    re.I,
+)
+
 
 # 상품명이 생활용품(비식품) 규칙에 해당하는지 반환한다.
 def is_non_food(text: str) -> bool:
     return NON_FOOD_PATTERN.search(text) is not None
+
+
+# 영수증 문자열이 상품이 아닌 결제 메타데이터나 메뉴 구성 설명인지 반환한다.
+def is_receipt_metadata(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", text).strip()
+    upper = compact.upper()
+    return any(keyword.upper() in upper for keyword in NON_PRODUCT_KEYWORDS) or RECEIPT_METADATA_PATTERN.search(compact) is not None
 
 
 # OCR 문자열을 받아 카드·전화번호 패턴을 REDACTED 표기로 바꿔 반환한다.
@@ -162,7 +179,7 @@ def build_food_candidate_lines(lines: list[OcrLine]) -> list[OcrLine]:
         compact = re.sub(r"\s+", " ", line.text).strip()
         if len(compact) < 2 or compact == "[REDACTED]":
             continue
-        if any(keyword in compact for keyword in NON_PRODUCT_KEYWORDS):
+        if is_receipt_metadata(compact):
             continue
         if not re.search(r"[가-힣A-Za-z]", compact):
             continue
@@ -300,6 +317,7 @@ def build_receipt_product_rows(lines: list[OcrLine], image_width: int) -> list[R
             and re.search(r"[가-힣A-Za-z]", line.text)
             and not re.fullmatch(r"[A-Za-z*]{1,2}", line.text.strip())
             and not any(keyword in line.text for keyword in _NOT_PRODUCT_NAME_TOKENS)
+            and not is_receipt_metadata(line.text)
         ]
         product_tokens.sort(key=lambda item: item[1][0])
         if anchor_name:
@@ -312,9 +330,12 @@ def build_receipt_product_rows(lines: list[OcrLine], image_width: int) -> list[R
         unit_price = _column_integer(tokens, image_width * 0.35, unit_quantity_boundary, anchor_y)
         quantity = _column_integer(tokens, unit_quantity_boundary, quantity_amount_boundary, anchor_y)
         amount = _column_integer(tokens, quantity_amount_boundary, image_width * 1.01, anchor_y)
+        if quantity is not None and not 1 <= quantity <= 100:
+            quantity = None
+        price_quantity = _quantity_from_price(unit_price, amount)
+        if price_quantity is not None and quantity != price_quantity:
+            quantity = price_quantity
         if quantity is None and any(re.fullmatch(r"\[?\d{7,13}\]?", line.text.strip()) for line, _ in tokens):
-            quantity = 1
-        if quantity is None and unit_price is not None and amount == unit_price:
             quantity = 1
         if quantity is None and amount is not None:
             quantity = 1
@@ -499,6 +520,15 @@ def _column_integer(tokens: list[tuple[OcrLine, tuple[float, float]]], minimum_x
         if line.confidence >= 0.35 and minimum_x <= center_x < maximum_x and re.fullmatch(r"\d{1,3}(?:,\d{3})*", line.text.strip()):
             return int(line.text.replace(",", ""))
     return None
+
+
+# 수량 열 OCR이 빠졌을 때 단가와 금액의 정확한 정수 비율로 1~100개 수량을 복원한다.
+# 가격 할인이 적용된 행은 나누어떨어지지 않으므로 추정하지 않고 기존 기본값 처리에 맡긴다.
+def _quantity_from_price(unit_price: int | None, amount: int | None) -> int | None:
+    if unit_price is None or amount is None or unit_price <= 0 or amount <= 0:
+        return None
+    quantity, remainder = divmod(amount, unit_price)
+    return quantity if remainder == 0 and 1 <= quantity <= 100 else None
 
 
 # OCR 사각형의 평균 세로 길이를 반환해 원근이 있는 영수증의 행 허용 오차 계산에 사용한다.

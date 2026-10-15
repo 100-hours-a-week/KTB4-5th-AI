@@ -107,6 +107,8 @@ runpod/
 ├── models/                     # 배포에 필요한 작은 체크포인트와 메타데이터
 ├── setup.sh                    # GPU 런타임 의존성 구성 경계
 ├── start.sh                    # 모델 워밍업과 Worker 프로세스 생명주기
+├── stop.sh                     # 실행 중인 Worker의 정상 종료
+├── restart.sh                  # 컨테이너를 유지한 채 하위 프로세스 재기동
 └── Dockerfile                  # 독립 배포 단위 정의
 ```
 
@@ -121,8 +123,13 @@ Worker는 요청 전체, OCR, LLM에 각각 별도의 동시성 제한을 둔다
 - OCR 엔진은 모델 상태와 메모리 사용을 보호하기 위해 직렬 실행한다.
 - Gemma 요청도 GPU 메모리 경합을 막기 위해 별도 세마포어로 제한한다.
 - 모델은 시작 과정에서 준비 상태를 확인하고 가능한 경우 워밍업한다.
-- Ollama 모델과 큰 런타임 데이터는 영구 볼륨에 두어 Worker 재생성 시 재사용한다.
+- 배포 체크포인트는 이미지의 `/app/models`를 사용한다. Ollama 캐시는 쓰기 권한이 보장되는
+  `/app/.ollama/models`를 사용하므로 새 컨테이너를 만들면 모델을 다시 내려받을 수 있다.
 - PaddleOCR 엔진은 메모리 아레나 비활성화와 제한적 재생성으로 장시간 실행 시 메모리 증가를 제어한다.
+
+`start.sh`는 Ollama와 Uvicorn을 하나의 생명주기로 관리하고 PID를 기록한다. `stop.sh`는 두 프로세스를
+정상 종료하며, `restart.sh`는 supervisor에 `SIGHUP`을 보내 Pod 컨테이너를 종료하지 않고 모델과
+Worker를 다시 워밍업한다. 실제 Pod 중지·시작과 GPU 반납은 RunPod 콘솔 또는 API의 책임이다.
 
 `/health/live`는 프로세스 생존을, `/health/ready`는 OCR·입력 분류·Gemma·상품 검출기가 실제 요청을
 받을 준비가 됐는지를 나타낸다.
