@@ -46,7 +46,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: fastapi
-          # v2 dev AI 인스턴스(t3)용
+          # v2 dev(t3)·stage(m7i) AI 인스턴스용
           platforms: linux/amd64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
@@ -71,5 +71,18 @@ jobs:
       id-token: write
     uses: 100-hours-a-week/KTB4-5th-CLOUD/.github/workflows/ecs-deploy.yml@main
     with:
+      service: ai
+      image: ${{ needs.build.outputs.image }}
+
+  deploy-stage:
+    name: v2 stage 배포
+    # dev 배포에 성공한 같은 이미지를 stage에 올린다.
+    needs: [build, deploy-v2]
+    permissions:
+      contents: read
+      id-token: write
+    uses: 100-hours-a-week/KTB4-5th-CLOUD/.github/workflows/ecs-deploy.yml@main
+    with:
+      env: stage
       service: ai
       image: ${{ needs.build.outputs.image }}
