@@ -298,7 +298,17 @@ class ReceiptAnalysisPipeline:
         )
         # 규칙·카탈로그로 정하지 못한 행만 GPU Worker의 Gemma 후보를 쓴다.
         model_selected = [item for item in remote_model_candidates if item.line_no in unresolved_line_numbers]
-        selected = sorted([*known_selected, *model_selected], key=lambda item: item.line_no)
+        selected = sorted(
+            [
+                item
+                for item in [*known_selected, *model_selected]
+                # 원문 후보를 통과했더라도 모델이 비식품 이름으로 정규화한 결과는 반환하지 않는다.
+                # 주소·결제 문구도 최종 결과 단계에서 다시 차단해 사용자 수정 부담을 줄인다.
+                if not is_non_food(item.normalized_name)
+                and not is_receipt_metadata(item.normalized_name)
+            ],
+            key=lambda item: item.line_no,
+        )
         logger.info(
             "pipeline.classification.finished analysis_id=%s request_id=%s ocr_lines=%s "
             "selected=%s elapsed_ms=%.2f prompt_tokens=%s "
@@ -434,6 +444,8 @@ class ReceiptAnalysisPipeline:
         # 고른 상품은 우선 유지하고, 글자가 없거나 낯선 포장 상품만 vision_model 후보로 보완한다.
         if remote_model_candidates:
             for candidate in _prefer_korean_product_candidates(remote_model_candidates):
+                if is_non_food(candidate.normalized_name) or is_receipt_metadata(candidate.normalized_name):
+                    continue
                 catalog_match = await self._lookup_catalog_category(candidate.normalized_name) if self._product_catalog_lookup is not None else None
                 if catalog_match is not None:
                     candidate = ClassifiedFoodLine(

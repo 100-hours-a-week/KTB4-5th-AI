@@ -78,8 +78,9 @@ erDiagram
   `product_knowledge.normalized_name` 정확 일치보다 우선하고, 하나의 쿼리(`UNION ALL` +
   `ORDER BY priority`)로 처리한다.
 - **3번(`pg_trgm` 유사도)**: 구현함, 단 정확 일치가 실패했을 때만 쓰는 폴백이다.
-  `product_knowledge.normalized_name`에 대해서만 `similarity() > settings.catalog_fuzzy_similarity_threshold`
-  (기본 0.4)로 후보를 찾고 유사도 내림차순 1건만 쓴다. `product_aliases`는 2건뿐이라
+  `product_knowledge.normalized_name`에 대해서만 `%` 연산자와
+  `settings.catalog_fuzzy_similarity_threshold`(기본 0.55)로 후보를 찾고 유사도 내림차순
+  1건만 쓴다. 조회 결과도 애플리케이션에서 같은 임계값으로 다시 검증한다. `product_aliases`는 2건뿐이라
   유사도 대상에서 뺐다(거의 빈 테이블을 UNION해도 의미 없음) — 별칭이 더 쌓이면 그때
   포함한다. 매칭되면 `category.source = "CATALOG_FUZZY"`로 정확 일치(`CATALOG`)와
   구분되고, 신뢰도를 유사도 값으로 낮춘다. `reviewReasons`에는
@@ -94,9 +95,10 @@ erDiagram
 `category.source = "CATALOG"`(정확 일치) 또는 `"CATALOG_FUZZY"`(유사도 폴백)로 표시되어
 정규식 매칭(`BUSINESS_RULE`)과 구분된다.
 
-임계값 0.4는 실제 OCR 오차 사례("예거라틀러레몬" vs 시드에 넣은 "예거라들러레몬", 글자 하나
-차이)로 `similarity()`를 직접 측정해 정했다 — 해당 쌍은 0.4545, 무관한 단어 쌍은 0으로
-명확히 갈렸다. 데이터가 늘면 재측정이 필요할 수 있다.
+임계값은 초기 OCR 오차 사례를 기준으로 0.4를 사용했으나, 100장 회귀 시험에서 주소·깨진 OCR
+문자열이 식품 카탈로그로 연결되는 오검출을 확인해 0.55로 높였다. 임계값 아래 항목은 삭제하는
+대신 미해결 행으로 남겨 규칙 또는 Gemma가 판단하게 하며, 이후 홀드아웃 Precision과 Recall을
+함께 측정해 재조정한다.
 
 추정된 소비기한은 실제 포장 표시 날짜가 아니므로 `ExpirationValue.date`를 채우지 않는다.
 규칙의 보관 가능 기간(`duration_min_days`~`duration_max_days`)을 확인된 구매일에 각각 더해

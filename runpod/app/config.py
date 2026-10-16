@@ -154,7 +154,7 @@ class Settings(BaseSettings):
     database_url: str | None = None
     database_pool_max_size: int = Field(default=5, ge=1, le=50)
     reference_cache_max_size: int = Field(default=2000, ge=1, le=100_000)
-    catalog_fuzzy_similarity_threshold: float = Field(default=0.4, ge=0.1, le=1.0)
+    catalog_fuzzy_similarity_threshold: float = Field(default=0.55, ge=0.1, le=1.0)
 
     callback_url: str | None = None
     callback_api_key: str | None = None

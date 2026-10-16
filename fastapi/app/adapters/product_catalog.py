@@ -90,6 +90,10 @@ class PostgresProductCatalogLookup:
             raise DependencyUnavailable("상품 카탈로그 조회에 실패했습니다.") from exc
         if row is None:
             return None
+        # DB 세션의 pg_trgm 임계값 설정이 누락되거나 오래된 pool이 남아 있어도 낮은 유사도
+        # 결과가 상품으로 확정되지 않도록 애플리케이션 계층에서 한 번 더 방어한다.
+        if matched_via == "fuzzy" and row["sim"] < self._settings.catalog_fuzzy_similarity_threshold:
+            return None
         return ProductCatalogMatch(
             product_id=row["product_id"],
             canonical_name=row["canonical_name"],
