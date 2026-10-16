@@ -79,6 +79,7 @@ fi
 ollama_pid=""
 worker_pid=""
 restart_requested=false
+stop_requested=false
 
 stop_children() {
     if [[ -n "$worker_pid" ]]; then
@@ -102,6 +103,21 @@ cleanup() {
 
 request_restart() {
     restart_requested=true
+    stop_requested=false
+    # 컨테이너 시작 명령이 LOAD_DOTENV=false로 실행됐더라도 운영 중 restart는
+    # 변경된 .env를 다시 읽어야 한다. 기존 프로세스 환경값은 같은 이름의 값으로 덮어쓴다.
+    if [[ -f .env ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source .env
+        set +a
+    fi
+    stop_children
+}
+
+request_stop() {
+    restart_requested=false
+    stop_requested=true
     stop_children
 }
 
@@ -114,6 +130,7 @@ request_shutdown() {
 trap cleanup EXIT
 trap request_shutdown INT TERM
 trap request_restart HUP
+trap request_stop USR1
 
 start_children() {
     ollama serve &
@@ -184,6 +201,7 @@ PY
 
 while true; do
     restart_requested=false
+    stop_requested=false
     start_children
     set +e
     wait -n "$ollama_pid" "$worker_pid"
@@ -192,6 +210,15 @@ while true; do
     stop_children
     if [[ "$restart_requested" == "true" ]]; then
         echo "GPU Worker를 재시작합니다." >&2
+        continue
+    fi
+    if [[ "$stop_requested" == "true" ]]; then
+        echo "GPU Worker 하위 프로세스를 중지했습니다. HUP 신호를 기다립니다." >&2
+        while [[ "$restart_requested" != "true" ]]; do
+            sleep 3600 &
+            wait $! 2>/dev/null || true
+        done
+        echo "GPU Worker를 다시 시작합니다." >&2
         continue
     fi
     echo "GPU Worker 하위 프로세스가 종료됐습니다: status=$child_status" >&2

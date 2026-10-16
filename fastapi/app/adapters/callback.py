@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 import httpx
@@ -20,6 +21,38 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# 콜백 payload에서 이미지 위치·인증 정보 없이 분석 결과 추적에 필요한 필드만 요약해 반환한다.
+def _callback_log_summary(payload: CallbackPayload) -> str:
+    summary: dict[str, object] = {
+        "analysisId": payload.analysis_id,
+        "status": payload.status,
+        "completedAt": payload.completed_at.isoformat(),
+    }
+    if payload.result is not None:
+        summary["documentType"] = payload.result.document_type
+        summary["itemCount"] = len(payload.result.items)
+        summary["items"] = [
+            {
+                "itemId": item.item_id,
+                "displayStatus": item.display_status,
+                "name": item.name,
+                "category": item.category,
+                "storageType": item.storage_type,
+                "measureType": item.measure_type,
+                "quantity": item.quantity,
+                "weight": item.weight.model_dump(mode="json"),
+                "expiration": item.expiration.model_dump(by_alias=True, mode="json"),
+                "reviewReasons": [
+                    reason.model_dump(by_alias=True, mode="json") for reason in item.review_reasons
+                ],
+            }
+            for item in payload.result.items
+        ]
+    if payload.error is not None:
+        summary["error"] = payload.error.model_dump(by_alias=True, mode="json")
+    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
 
 
 # 완료·실패된 분석 view를 백엔드 콜백 명세 형식의 payload로 변환해 반환한다.
@@ -127,17 +160,19 @@ class CallbackDelivery:
                 )
                 if response.status_code == 200:
                     logger.info(
-                        "callback.succeeded analysis_id=%s attempt=%s status=%s",
+                        "callback.succeeded analysis_id=%s attempt=%s http_status=%s payload_summary=%s",
                         payload.analysis_id,
                         attempt,
                         response.status_code,
+                        _callback_log_summary(payload),
                     )
                     return True
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     logger.warning(
-                        "callback.rejected analysis_id=%s status=%s",
+                        "callback.rejected analysis_id=%s http_status=%s payload_summary=%s",
                         payload.analysis_id,
                         response.status_code,
+                        _callback_log_summary(payload),
                     )
                     return False
             except httpx.HTTPError:
@@ -148,6 +183,12 @@ class CallbackDelivery:
                 )
             if attempt < self._settings.callback_max_attempts:
                 await asyncio.sleep(min(0.25 * (2 ** (attempt - 1)), 2.0))
+        logger.error(
+            "callback.exhausted analysis_id=%s attempts=%s payload_summary=%s",
+            payload.analysis_id,
+            self._settings.callback_max_attempts,
+            _callback_log_summary(payload),
+        )
         return False
 
     # 기존 HTTP 클라이언트를 반환하거나 설정 timeout으로 새 클라이언트를 생성해 반환한다.

@@ -26,10 +26,12 @@ if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
     exit 0
 fi
 
-kill -TERM "$pid"
+# supervisor가 컨테이너 진입점의 유일한 하위 프로세스인 환경에서는 supervisor 종료가
+# 컨테이너 종료로 이어진다. supervisor는 유지하고 Ollama/Uvicorn만 중지한다.
+kill -USR1 "$pid"
 for _ in $(seq 1 30); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-        echo "GPU Worker를 종료했습니다."
+    if ! curl -fsS "http://127.0.0.1:${WORKER_PORT:-9000}/health/ready" >/dev/null 2>&1; then
+        echo "GPU Worker 하위 프로세스를 중지했습니다."
         exit 0
     fi
     sleep 1

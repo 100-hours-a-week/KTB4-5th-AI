@@ -8,7 +8,7 @@ from time import perf_counter
 from PIL import Image, ImageOps
 
 from app.adapters.input_classifier import OnnxMobileNetInputClassifier
-from app.adapters.ocr import PaddleTextExtractor
+from app.adapters.ocr import PaddleTextExtractorPool
 from app.adapters.ollama import OllamaFoodClassifier
 from app.adapters.product_detector import YoloESegProductDetector, YoloWorldProductDetector
 from app.config import Settings
@@ -41,7 +41,7 @@ class GpuInferenceEngine:
         self._ocr_semaphore = asyncio.Semaphore(settings.worker_ocr_max_concurrency)
         self._llm_semaphore = asyncio.Semaphore(settings.worker_llm_max_concurrency)
         self._downloader = SecureImageDownloader(settings)
-        self._ocr = PaddleTextExtractor(settings)
+        self._ocr = PaddleTextExtractorPool(settings)
         classifier_enabled = settings.input_classifier_backend == "onnx" or (settings.input_classifier_backend == "auto" and Path(settings.input_classifier_model_path).is_file())
         self._input_classifier = OnnxMobileNetInputClassifier(settings) if classifier_enabled else None
         self._food_classifier = OllamaFoodClassifier(settings) if settings.worker_enable_llm else None

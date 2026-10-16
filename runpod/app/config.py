@@ -62,8 +62,9 @@ class Settings(BaseSettings):
     worker_allow_private_image_urls: bool = False
     worker_download_timeout_seconds: float = Field(default=30.0, gt=0)
     worker_enable_llm: bool = True
-    # 다운로드를 포함한 전체 요청은 두 개를 겹쳐 받되 GPU OCR과 LLM은
-    # 각각 별도 세마포어로 제한해 T4 메모리 경합과 OOM을 막는다.
+    # 다운로드를 포함한 전체 요청은 두 개를 겹쳐 받되 GPU OCR과 LLM은 각각 별도
+    # 세마포어로 제한한다. OCR 값이 2 이상이면 같은 수의 독립 PaddleOCR 엔진 풀을 만든다.
+    # LLM 값이 2 이상이면 OLLAMA_NUM_PARALLEL도 같은 값으로 설정해야 실제 병렬 슬롯이 열린다.
     worker_max_concurrency: int = Field(default=2, ge=1, le=16)
     worker_ocr_max_concurrency: int = Field(default=1, ge=1, le=16)
     worker_llm_max_concurrency: int = Field(default=1, ge=1, le=16)

@@ -418,6 +418,40 @@ class PaddleTextExtractor:
             return ()
 
 
+class PaddleTextExtractorPool:
+    """서로 독립된 PaddleOCR 엔진을 요청 단위로 대여하는 고정 크기 풀이다."""
+
+    # 설정의 OCR 동시성 수만큼 독립 추출기를 만들고 사용 가능한 인덱스를 큐에 등록한다.
+    def __init__(self, settings: Settings) -> None:
+        self._extractors = tuple(PaddleTextExtractor(settings) for _ in range(settings.worker_ocr_max_concurrency))
+        self._available: asyncio.Queue[int] = asyncio.Queue(maxsize=len(self._extractors))
+        for index in range(len(self._extractors)):
+            self._available.put_nowait(index)
+
+    # 모든 OCR 엔진을 순차 초기화해 GPU 메모리 급증 없이 풀 전체 준비 여부를 반환한다.
+    async def ready(self) -> bool:
+        for extractor in self._extractors:
+            if not await extractor.ready():
+                return False
+        return True
+
+    # 사용 가능한 엔진 하나를 대여해 일반 OCR을 수행하고 완료·실패와 무관하게 반환한다.
+    async def extract(self, image: LoadedImage) -> OcrDocument:
+        index = await self._available.get()
+        try:
+            return await self._extractors[index].extract(image)
+        finally:
+            self._available.put_nowait(index)
+
+    # 사용 가능한 엔진 하나를 대여해 영수증 타일 OCR을 수행하고 완료·실패와 무관하게 반환한다.
+    async def extract_receipt(self, image: LoadedImage) -> OcrDocument:
+        index = await self._available.get()
+        try:
+            return await self._extractors[index].extract_receipt(image)
+        finally:
+            self._available.put_nowait(index)
+
+
 class StubTextExtractor:
     """테스트 주입 전용. production 설정에서는 사용할 수 없다."""
 

@@ -120,16 +120,19 @@ EC2 라우터, PostgreSQL 카탈로그, 큐 또는 백엔드 콜백 코드가 �
 Worker는 요청 전체, OCR, LLM에 각각 별도의 동시성 제한을 둔다. FastAPI 컨슈머를 늘려도 단일 GPU의
 모델 실행이 무한히 병렬화되지는 않으며, GPU 메모리와 지연 시간을 기준으로 제한값을 정해야 한다.
 
-- OCR 엔진은 모델 상태와 메모리 사용을 보호하기 위해 직렬 실행한다.
-- Gemma 요청도 GPU 메모리 경합을 막기 위해 별도 세마포어로 제한한다.
+- OCR은 `WORKER_OCR_MAX_CONCURRENCY` 수만큼 독립 PaddleOCR 엔진 풀을 만든다. A5000 실측에서
+  2개가 1개보다 20장 처리 시간을 약 13% 줄여 배포 예시는 2로 두며, 다른 GPU에서는 다시 측정한다.
+- Gemma 요청은 `WORKER_LLM_MAX_CONCURRENCY` 세마포어로 제한한다. 2 이상을 사용할 때는
+  `OLLAMA_NUM_PARALLEL`도 같은 값으로 설정해야 Ollama 내부 슬롯도 함께 늘어난다.
 - 모델은 시작 과정에서 준비 상태를 확인하고 가능한 경우 워밍업한다.
 - 배포 체크포인트는 이미지의 `/app/models`를 사용한다. Ollama 캐시는 쓰기 권한이 보장되는
   `/app/.ollama/models`를 사용하므로 새 컨테이너를 만들면 모델을 다시 내려받을 수 있다.
 - PaddleOCR 엔진은 메모리 아레나 비활성화와 제한적 재생성으로 장시간 실행 시 메모리 증가를 제어한다.
 
-`start.sh`는 Ollama와 Uvicorn을 하나의 생명주기로 관리하고 PID를 기록한다. `stop.sh`는 두 프로세스를
-정상 종료하며, `restart.sh`는 supervisor에 `SIGHUP`을 보내 Pod 컨테이너를 종료하지 않고 모델과
-Worker를 다시 워밍업한다. 실제 Pod 중지·시작과 GPU 반납은 RunPod 콘솔 또는 API의 책임이다.
+`start.sh`는 Ollama와 Uvicorn을 하나의 생명주기로 관리하고 PID를 기록한다. `stop.sh`는 supervisor와
+Pod 컨테이너는 유지한 채 두 하위 프로세스만 정상 종료한다. `restart.sh`는 supervisor에 `SIGHUP`을
+보내 `.env`를 다시 읽고 모델과 Worker를 재기동·워밍업한다. 실제 Pod 중지·시작과 GPU 반납은
+RunPod 콘솔 또는 API의 책임이다.
 
 `/health/live`는 프로세스 생존을, `/health/ready`는 OCR·입력 분류·Gemma·상품 검출기가 실제 요청을
 받을 준비가 됐는지를 나타낸다.
