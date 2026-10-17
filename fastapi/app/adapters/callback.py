@@ -88,23 +88,21 @@ def _callback_result(result: AnalysisResult) -> CallbackResult:
     )
 
 
-# 백엔드 명세는 인식하지 못한 값을 기본값으로 채우지 않고 null로 받는다. 영수증·포장에서 읽지 못해
-# 규칙상 기본값(수량 1)으로 제안한 수량은 null로 보낸다. WEIGHT 항목은 명세상 quantity를 쓰지 않으므로
-# 항상 null이다.
+# 내부 분석 결과에 수량과 중량이 함께 있으면 콜백에서도 둘 다 보존한다. 포장 중량이 있는 상품도
+# 여러 개 구매할 수 있으므로 WEIGHT 항목의 quantity를 제거하지 않으며, 규칙으로 보완한 수량도
+# 사용자가 검토할 후보값으로 전달한다. 인식하지 못해 규칙 기본값만 있는 수량과 중량은 0으로 보낸다.
 def _callback_item(item: ReceiptItem) -> CallbackItem:
-    quantity = None
-    if item.measure_type == "COUNT" and item.quantity is not None and item.quantity.source != Source.BUSINESS_RULE:
-        quantity = item.quantity.value
+    quantity = item.quantity.value if item.quantity is not None and item.quantity.source != Source.BUSINESS_RULE else 0
     if item.measure_type == "COUNT":
-        weight = CallbackWeight(value=None, unit="NONE")
+        weight = CallbackWeight(value=0, unit="NONE")
     else:
-        # 백엔드 명세상 중량은 양수만 유효하다. 0 이하는 인식하지 못한 값으로 보고 값·단위를 null로 보낸다.
+        # 0 이하는 인식하지 못한 값으로 보고 값 0과 NONE 단위로 정규화한다.
         recognized = item.weight.value is not None and item.weight.value > 0
-        weight = CallbackWeight(value=item.weight.value if recognized else None, unit=item.weight.unit if recognized else None)
+        weight = CallbackWeight(value=item.weight.value if recognized else 0, unit=item.weight.unit if recognized else "NONE")
     # 측정 방식에 필요한 값(COUNT의 수량, WEIGHT의 중량)이 없으면 등록에 필요한 값이 빠진 것이므로
     # 백엔드 명세에 따라 NEEDS_REVIEW로 보낸다.
     display_status = item.display_status
-    measurement_missing = quantity is None if item.measure_type == "COUNT" else weight.value is None
+    measurement_missing = quantity <= 0 if item.measure_type == "COUNT" else weight.value <= 0
     if measurement_missing and display_status in {DisplayStatus.RECOGNIZED, DisplayStatus.AI_ESTIMATED}:
         display_status = DisplayStatus.NEEDS_REVIEW
     return CallbackItem(

@@ -5,6 +5,7 @@ import gc
 import io
 import logging
 import re
+import statistics
 import tempfile
 from typing import Any
 
@@ -47,7 +48,7 @@ class PaddleTextExtractor:
             await self._maybe_recycle_engine()
         return OcrDocument(lines=tuple(lines), width=image.width, height=image.height)
 
-    # 영수증 전체 OCR과 겹치는 세로 타일 OCR을 실행해 작은 상품행 detection 누락을 보완한다.
+    # 영수증 전체 OCR 뒤 누락 상품번호 주변만 다시 읽어 작은 상품행 detection 누락을 보완한다.
     async def extract_receipt(self, image: LoadedImage) -> OcrDocument:
         async with self._lock:
             engine = await self._get_engine()
@@ -241,34 +242,36 @@ class PaddleTextExtractor:
             result = engine.ocr(temp.name, cls=True)
             return self._parse_legacy(result)
 
-    # 전체 영수증 결과에 세로 타일 결과의 원본 좌표를 복원해 합치고 중복 줄을 제거한다.
+    # 전체 영수증 결과에서 번호가 빠진 구간만 잘라 재인식하고 원본 좌표로 합친다.
     def _predict_receipt(self, engine: Any, image: LoadedImage) -> list[OcrLine]:
         primary = self._predict(engine, image.content)
         if not self._settings.worker_receipt_ocr_tiling or image.height <= image.width:
             return primary
         missing_item_numbers = self._missing_receipt_item_numbers(primary)
-        if not missing_item_numbers:
-            logger.info("ocr.receipt_tiling skipped=no_number_gap primary=%d", len(primary))
+        low_confidence_numbers = {
+            number
+            for line in primary
+            if line.confidence < self._settings.worker_receipt_ocr_recheck_confidence
+            and (number := self._receipt_item_number(line.text)) is not None
+        }
+        recheck_item_numbers = missing_item_numbers | low_confidence_numbers
+        if not recheck_item_numbers:
+            logger.info("ocr.receipt_tiling skipped=no_number_gap_or_low_confidence primary=%d", len(primary))
             return primary
 
         source = Image.open(io.BytesIO(image.content)).convert("RGB")
-        tile_height = max(320, round(source.height * self._settings.worker_receipt_ocr_tile_height_ratio))
-        overlap = max(32, round(tile_height * self._settings.worker_receipt_ocr_tile_overlap_ratio))
-        step = max(1, tile_height - overlap)
+        crop_ranges = self._missing_receipt_crop_ranges(primary, recheck_item_numbers, source.height)
+        if not crop_ranges:
+            crop_ranges = self._fallback_receipt_crop_ranges(source.height)
         tiled: list[OcrLine] = []
-        top = 0
-        while top < source.height:
-            bottom = min(source.height, top + tile_height)
-            if bottom - top < 160:
-                top = max(0, source.height - tile_height)
-                bottom = source.height
+        for top, bottom in crop_ranges:
             crop = source.crop((0, top, source.width, bottom))
             buffer = io.BytesIO()
             crop.save(buffer, format="PNG")
             for line in self._predict(engine, buffer.getvalue(), disable_unwarping=True):
                 if line.confidence < self._settings.worker_receipt_ocr_tile_min_confidence:
                     continue
-                if self._receipt_item_number(line.text) not in missing_item_numbers:
+                if self._receipt_item_number(line.text) not in recheck_item_numbers:
                     continue
                 tiled.append(
                     OcrLine(
@@ -278,13 +281,130 @@ class PaddleTextExtractor:
                         box=tuple((x, y + top) for x, y in line.box),
                     )
                 )
-            if bottom >= source.height:
-                break
-            top += step
 
         merged = self._merge_lines(primary, tiled)
-        logger.info("ocr.receipt_tiling primary=%d tiled=%d merged=%d", len(primary), len(tiled), len(merged))
+        covered_height = sum(bottom - top for top, bottom in crop_ranges)
+        logger.info(
+            "ocr.receipt_tiling primary=%d missing=%s low_confidence=%s crops=%d coverage_ratio=%.3f tiled=%d merged=%d",
+            len(primary),
+            sorted(missing_item_numbers),
+            sorted(low_confidence_numbers),
+            len(crop_ranges),
+            covered_height / max(1, source.height),
+            len(tiled),
+            len(merged),
+        )
         return merged
+
+    # 검출된 상품번호의 y좌표와 행 간격을 이용해 누락 번호가 있을 법한 최소 세로 구간을 계산한다.
+    @classmethod
+    def _missing_receipt_crop_ranges(
+        cls,
+        lines: list[OcrLine],
+        missing_numbers: set[int],
+        image_height: int,
+    ) -> list[tuple[int, int]]:
+        numbered = sorted(
+            (
+                number,
+                cls._box_center(line.box)[1],
+                max(1.0, cls._box_height(line.box)),
+            )
+            for line in lines
+            if (number := cls._receipt_item_number(line.text)) is not None and line.box
+        )
+        if len(numbered) < 2 or not missing_numbers or image_height <= 0:
+            return []
+
+        spacings = [
+            (right_y - left_y) / (right_number - left_number)
+            for (left_number, left_y, _), (right_number, right_y, _) in zip(numbered, numbered[1:], strict=False)
+            if right_number > left_number and right_y > left_y
+        ]
+        median_height = statistics.median(height for _, _, height in numbered)
+        row_spacing = statistics.median(spacings) if spacings else median_height * 2.5
+        row_spacing = max(median_height * 1.5, min(row_spacing, image_height * 0.2))
+
+        detected_by_number = {number: y for number, y, _ in numbered}
+        detected_numbers = sorted(detected_by_number)
+        missing_groups = cls._contiguous_number_groups(missing_numbers)
+        ranges: list[tuple[int, int]] = []
+        minimum_height = max(160, round(row_spacing * 1.4))
+
+        for first, last in missing_groups:
+            previous = max((number for number in detected_numbers if number < first), default=None)
+            following = min((number for number in detected_numbers if number > last), default=None)
+            if previous is None and following is None:
+                continue
+
+            predicted_first = (
+                detected_by_number[previous] + (first - previous) * row_spacing
+                if previous is not None
+                else detected_by_number[following] - (following - first) * row_spacing
+            )
+            predicted_last = (
+                detected_by_number[following] - (following - last) * row_spacing
+                if following is not None
+                else detected_by_number[previous] + (last - previous) * row_spacing
+            )
+            padding = max(median_height * 1.5, row_spacing * 0.45)
+            top = max(0, round(predicted_first - padding))
+            bottom = min(image_height, round(predicted_last + padding))
+            if bottom - top < minimum_height:
+                center = (top + bottom) // 2
+                top = max(0, center - minimum_height // 2)
+                bottom = min(image_height, top + minimum_height)
+                top = max(0, bottom - minimum_height)
+            ranges.append((top, bottom))
+
+        return cls._merge_crop_ranges(ranges)
+
+    # 누락 번호 집합을 (시작, 끝) 형태의 연속 구간 목록으로 바꾼다.
+    @staticmethod
+    def _contiguous_number_groups(numbers: set[int]) -> list[tuple[int, int]]:
+        ordered = sorted(numbers)
+        if not ordered:
+            return []
+        groups: list[tuple[int, int]] = []
+        first = previous = ordered[0]
+        for number in ordered[1:]:
+            if number != previous + 1:
+                groups.append((first, previous))
+                first = number
+            previous = number
+        groups.append((first, previous))
+        return groups
+
+    # 서로 겹치거나 맞닿은 crop은 한 번만 OCR하도록 하나의 구간으로 합친다.
+    @staticmethod
+    def _merge_crop_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        merged: list[tuple[int, int]] = []
+        for top, bottom in sorted(ranges):
+            if bottom <= top:
+                continue
+            if merged and top <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], bottom))
+            else:
+                merged.append((top, bottom))
+        return merged
+
+    # 번호 좌표가 불충분한 예외 영수증에서만 기존 겹침 타일 범위를 안전망으로 반환한다.
+    def _fallback_receipt_crop_ranges(self, image_height: int) -> list[tuple[int, int]]:
+        tile_height = max(320, round(image_height * self._settings.worker_receipt_ocr_tile_height_ratio))
+        overlap = max(32, round(tile_height * self._settings.worker_receipt_ocr_tile_overlap_ratio))
+        step = max(1, tile_height - overlap)
+        ranges: list[tuple[int, int]] = []
+        top = 0
+        while top < image_height:
+            bottom = min(image_height, top + tile_height)
+            if bottom - top < 160:
+                top = max(0, image_height - tile_height)
+                bottom = image_height
+            ranges.append((top, bottom))
+            if bottom >= image_height:
+                break
+            top += step
+        return list(dict.fromkeys(ranges))
 
     # OCR 상품행 번호의 중간 공백과 상품수 표기 이후의 누락 번호를 찾아 재검출 대상을 제한한다.
     @classmethod

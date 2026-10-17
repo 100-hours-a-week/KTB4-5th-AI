@@ -33,8 +33,14 @@ class _SelectedLine(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class _ReceiptSelectedLine(BaseModel):
+    line_no: int = Field(alias="lineNo")
+    category: Category
+    confidence: float = Field(ge=0, le=1)
+
+
 class _ClassifierOutput(BaseModel):
-    items: list[_SelectedLine] = Field(max_length=20)
+    items: list[_ReceiptSelectedLine] = Field(max_length=20)
 
 
 class _VisionClassifierOutput(BaseModel):
@@ -54,8 +60,8 @@ OCR에 없는 줄·상품은 만들지 말고 매장정보·합계·할인·결�
 가격 힌트가 붙은 낯선 상품도 포함하며 불확실하면 confidence를 낮춘다.
 category: VEGETABLE,FRUIT,MEAT,SEAFOOD,DAIRY,TOFU_BEAN,GRAINS_NOODLE,
 PROCESSED_FOOD,SEASONING,BEVERAGE,OTHER. 과자·면·조리식품=PROCESSED_FOOD, 물·커피·주류=BEVERAGE,
-소금·소스=SEASONING. 형식: {"items":[{"lineNo":1,"normalizedName":"우유",
-"category":"DAIRY","confidence":0.8}]}. 없으면 {"items":[]}."""
+소금·소스=SEASONING. 상품명을 다시 쓰지 말고 형식은
+{"items":[{"lineNo":1,"category":"DAIRY","confidence":0.8}]}이다. 없으면 {"items":[]}."""
 
 _CLASSIFIER_FORMAT = {
     "type": "object",
@@ -67,11 +73,10 @@ _CLASSIFIER_FORMAT = {
                 "type": "object",
                 "properties": {
                     "lineNo": {"type": "integer"},
-                    "normalizedName": {"type": "string"},
                     "category": {"type": "string", "enum": [item.value for item in Category]},
                     "confidence": {"type": "number"},
                 },
-                "required": ["lineNo", "normalizedName", "category", "confidence"],
+                "required": ["lineNo", "category", "confidence"],
             },
         }
     },
@@ -162,7 +167,7 @@ class OllamaFoodClassifier:
             "options": {
                 "temperature": self._settings.ollama_temperature,
                 "seed": 42,
-                "num_predict": min(self._settings.ollama_num_predict, 64 + len(lines) * 24),
+                "num_predict": min(self._settings.ollama_num_predict, 48 + len(lines) * 16),
             },
         }
         try:
@@ -191,9 +196,8 @@ class OllamaFoodClassifier:
             if item.line_no not in allowed or item.line_no in seen:
                 continue
             original_line = allowed[item.line_no]
-            original = original_line.text
-            normalized = item.normalized_name.strip()
-            if not normalized or not self._has_text_overlap(original, normalized):
+            normalized = self._receipt_product_name(original_line.text)
+            if not normalized:
                 continue
             seen.add(item.line_no)
             selected.append(
@@ -213,6 +217,12 @@ class OllamaFoodClassifier:
             llm_load_duration_ns=body.get("load_duration"),
         )
         return selected, diagnostics
+
+    # 분류 프롬프트에 덧붙인 수량·금액 힌트와 행 번호만 제거해 OCR 상품명을 그대로 보존한다.
+    @staticmethod
+    def _receipt_product_name(text: str) -> str:
+        without_hint = re.sub(r"\s*\((?:[^()]*(?:수량|금액|원|개)[^()]*)\)\s*$", "", text).strip()
+        return re.sub(r"^\s*\d{3}\s+", "", without_hint).strip(" \t-*#@")
 
     # 원본 이미지와 OCR 줄을 함께 Gemma 비전 모델에 전달해 문서 유형·상품 후보·보정 OCR 줄을 반환한다.
     async def classify_image(
@@ -415,14 +425,3 @@ class OllamaFoodClassifier:
             payload = repair_json_loads(cleaned, skip_json_loads=True)
         return _ClassifierOutput.model_validate(payload)
 
-    @staticmethod
-    # OCR 원문과 정규화 이름을 받아 공통 토큰 또는 포함 관계 존재 여부를 반환한다.
-    def _has_text_overlap(original: str, normalized: str) -> bool:
-
-        # 문자열에서 두 글자 이상의 한글·영문 토큰 집합을 반환한다.
-        def tokens(value: str) -> set[str]:
-            return set(re.findall(r"[가-힣A-Za-z]{2,}", value.lower()))
-
-        original_tokens = tokens(original)
-        normalized_tokens = tokens(normalized)
-        return bool(original_tokens & normalized_tokens) or normalized.replace(" ", "") in original.replace(" ", "")

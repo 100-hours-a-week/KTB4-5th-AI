@@ -259,10 +259,10 @@ class AnalysisView(BaseModel):
 
 # 아래 Callback* 모델은 백엔드가 소유한 "재고 인식 결과 콜백 API 명세"
 # (POST /api/v1/internal/image-analyses/callback)를 따른다. GET 조회용 AnalysisResult보다 단순한
-# 평면 구조이며, 인식하지 못한 값은 기본값 대신 null로 보낸다.
+# 평면 구조이며, 인식하지 못한 수량·중량은 0으로 보낸다.
 class CallbackWeight(BaseModel):
-    value: float | None = Field(default=None, gt=0)
-    unit: Literal["G", "ML", "NONE"] | None
+    value: float = Field(ge=0)
+    unit: Literal["G", "ML", "NONE"]
 
 
 class CallbackExpiration(BaseModel):
@@ -280,7 +280,7 @@ class CallbackItem(BaseModel):
     category: Category | None
     storage_type: Literal["REFRIGERATED", "FROZEN"] | None = Field(alias="storageType")
     measure_type: Literal["COUNT", "WEIGHT"] | None = Field(alias="measureType")
-    quantity: int | None = Field(ge=1, le=100)
+    quantity: int = Field(ge=0, le=100)
     weight: CallbackWeight
     expiration: CallbackExpiration
     review_reasons: list[ReviewReason] = Field(default_factory=list, alias="reviewReasons")

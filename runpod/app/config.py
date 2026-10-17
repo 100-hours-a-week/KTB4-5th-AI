@@ -86,11 +86,13 @@ class Settings(BaseSettings):
     # 원본이 충분히 크면 재인코딩하지 않아 일반 요청 비용은 늘리지 않는다.
     worker_receipt_ocr_min_long_edge: int = Field(default=1280, ge=0, le=2400)
     # 긴 영수증은 전체 이미지를 한 번에 축소하면 작은 상품행이 detection 단계에서 통째로
-    # 누락될 수 있다. 전체 OCR 뒤 세로 구간을 겹쳐 한 번 더 검출하고 좌표로 병합한다.
+    # 누락될 수 있다. 전체 OCR 뒤 누락 번호·저신뢰 행 주변만 다시 검출하고 좌표로 병합한다.
     worker_receipt_ocr_tiling: bool = True
     worker_receipt_ocr_tile_height_ratio: float = Field(default=0.55, ge=0.35, le=0.8)
     worker_receipt_ocr_tile_overlap_ratio: float = Field(default=0.15, ge=0.05, le=0.4)
     worker_receipt_ocr_tile_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    # 이 값보다 낮은 상품번호 행은 누락 행과 함께 좁은 영역으로 한 번 더 OCR한다.
+    worker_receipt_ocr_recheck_confidence: float = Field(default=0.82, ge=0.0, le=1.0)
 
     image_source: Literal["s3", "local"] = "local"
     local_image_root: str = "./var/uploads"
