@@ -55,6 +55,23 @@ erDiagram
 - 단계별 지연시간·토큰 관측: Phoenix/OpenTelemetry와 역할이 겹치므로 어느 쪽을 쓸지 정하기
   전까지는 테이블을 만들지 않는다.
 - 작업 큐: 큐는 FastAPI 프로세스 메모리에 있고 DB 상태 행을 작업 선점 용도로 사용하지 않는다.
+- 분석 요청·requestId 색인: 재시작하면 처리 중이던 분석은 사라지고, 백엔드가 같은 requestId로 다시 보내면 새로 분석한다.
+
+## 완료 콜백 outbox (`analysis_callback_outbox`)
+
+`CALLBACK_OUTBOX_ENABLED=true`일 때만 쓴다. 분석이 끝나면 백엔드 콜백 본문을 이 테이블에 먼저 저장하고,
+백엔드가 200으로 받을 때까지 1초부터 두 배씩(최대 `CALLBACK_OUTBOX_MAX_RETRY_DELAY_SECONDS`) 간격을 늘려
+다시 보낸다. AI가 재시작해도 `PENDING` 행을 이어서 보낸다. 분석 결과 원본(GET 응답)은 저장하지 않는다.
+
+| 상태 | 뜻 |
+| --- | --- |
+| `PENDING` | 보낼 차례. 보내는 동안은 `next_attempt_at`을 선점 만료 시각으로 쓴다 |
+| `DELIVERED` | 백엔드가 200으로 받음 |
+| `REJECTED` | 백엔드가 재시도할 수 없는 응답(429·5xx가 아닌 4xx 등)을 줌 |
+| `EXPIRED` | `CALLBACK_OUTBOX_EXPIRES_SECONDS`(1일) 안에 전달하지 못함 |
+
+끝난 행은 `CALLBACK_OUTBOX_RETENTION_SECONDS`(7일) 뒤 지운다. 테이블 생성 SQL은 마이그레이션 디렉터리가
+아니라 배포 담당자가 검토 후 직접 적용한다.
 
 ## 조회 순서
 

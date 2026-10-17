@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     callback_api_key: str | None = None
     callback_timeout_seconds: float = Field(default=5.0, gt=0)
     callback_max_attempts: int = Field(default=3, ge=1, le=10)
+    # 켜면 완료 콜백을 AI DB에 먼저 저장하고, BE가 200으로 받을 때까지 AI 재시작과 관계없이 다시 보낸다.
+    # receipt_ai.analysis_callback_outbox 테이블을 만든 뒤에 켠다.
+    callback_outbox_enabled: bool = False
+    # 재전송 간격은 1초부터 두 배씩 늘려 이 값에서 멈춘다. BE가 콜백 기한(2분)마다 AI를 조회하므로
+    # 그보다 짧게 둬야 BE 복구 뒤 조회보다 콜백이 먼저 닿는다.
+    callback_outbox_max_retry_delay_seconds: float = Field(default=60.0, ge=1)
+    # BE는 1일이 지난 분석을 실패로 끝내므로 그 뒤의 콜백은 쓰이지 않는다.
+    callback_outbox_expires_seconds: int = Field(default=86_400, ge=60)
+    callback_outbox_retention_seconds: int = Field(default=7 * 86_400, ge=60)
+    callback_outbox_batch_size: int = Field(default=20, ge=1, le=500)
+    callback_outbox_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
 
     # 응답 modelTrace에 기록하는 버전 정보. 모델 자체는 GPU Worker에서 실행되므로 Worker 구성이
     # 바뀌면 이 값들도 함께 맞춘다.
@@ -71,6 +82,8 @@ class Settings(BaseSettings):
             raise ValueError("CALLBACK_URL을 사용하려면 CALLBACK_API_KEY가 필요합니다")
         if self.callback_api_key and not self.callback_url:
             raise ValueError("CALLBACK_API_KEY를 사용하려면 CALLBACK_URL이 필요합니다")
+        if self.callback_outbox_enabled and not (self.database_url and self.callback_url):
+            raise ValueError("CALLBACK_OUTBOX_ENABLED를 사용하려면 DATABASE_URL과 CALLBACK_URL이 필요합니다")
         if self.app_env == "production" and not self.internal_api_key:
             raise ValueError("production에서는 INTERNAL_API_KEY가 필요합니다")
         if self.app_env == "production" and not self.callback_url:
