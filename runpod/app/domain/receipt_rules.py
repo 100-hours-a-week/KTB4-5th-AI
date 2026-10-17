@@ -75,8 +75,11 @@ KNOWN_FOOD_CATEGORY_RULES = (
 _COMMON_OCR_CORRECTIONS = (
     (re.compile(r"챗잎|쳇잎"), "깻잎"),
     (re.compile(r"잉파"), "양파"),
+    # 실제 하선정 영수증에서 "장조림"을 "장아씨/장아찌"로 반복 오독했다. 일반 장아찌를
+    # 바꾸지 않고 OCR 원문에 브랜드·고유 문구·오독 문자열이 함께 있을 때만 복원한다.
+    (re.compile(r"(하선정\s*바로\s*먹기\s*좋은)\s*장아씨", re.I), r"\1 장조림"),
     (re.compile(r"장아씨"), "장아찌"),
-    (re.compile(r"(장아찌\s*\d+)9\b"), r"\1g"),
+    (re.compile(r"((?:장아찌|장조림)\s*\d+)9\b"), r"\1g"),
     (re.compile(r"브로커리"), "브로콜리"),
     (re.compile(r"궁모닝우유"), "굿모닝우유"),
     (re.compile(r"성생감자칩"), "생생감자칩"),

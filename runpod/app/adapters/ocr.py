@@ -254,7 +254,15 @@ class PaddleTextExtractor:
             if line.confidence < self._settings.worker_receipt_ocr_recheck_confidence
             and (number := self._receipt_item_number(line.text)) is not None
         }
-        recheck_item_numbers = missing_item_numbers | low_confidence_numbers
+        # 번호는 읽혔지만 상품명 부분이 매장 구분자(P/F 등) 한두 글자뿐이면 검출 성공으로
+        # 간주하면 안 된다. 해당 행만 타일 OCR로 다시 읽어 `003 P` 같은 가짜 상품명을 복구한다.
+        low_information_numbers = {
+            number
+            for line in primary
+            if (number := self._receipt_item_number(line.text)) is not None
+            and self._receipt_product_information_score(line.text) == 0
+        }
+        recheck_item_numbers = missing_item_numbers | low_confidence_numbers | low_information_numbers
         if not recheck_item_numbers:
             logger.info("ocr.receipt_tiling skipped=no_number_gap_or_low_confidence primary=%d", len(primary))
             return primary
@@ -285,10 +293,11 @@ class PaddleTextExtractor:
         merged = self._merge_lines(primary, tiled)
         covered_height = sum(bottom - top for top, bottom in crop_ranges)
         logger.info(
-            "ocr.receipt_tiling primary=%d missing=%s low_confidence=%s crops=%d coverage_ratio=%.3f tiled=%d merged=%d",
+            "ocr.receipt_tiling primary=%d missing=%s low_confidence=%s low_information=%s crops=%d coverage_ratio=%.3f tiled=%d merged=%d",
             len(primary),
             sorted(missing_item_numbers),
             sorted(low_confidence_numbers),
+            sorted(low_information_numbers),
             len(crop_ranges),
             covered_height / max(1, source.height),
             len(tiled),
@@ -434,6 +443,13 @@ class PaddleTextExtractor:
         match = re.match(r"^\s*0*(\d{1,2})\s*[^0-9\s,.$*]", text)
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _receipt_product_information_score(text: str) -> int:
+        # 상품번호와 마트 구분자(P/F), 별표를 제거한 뒤 실제 상품명 문자 수를 센다.
+        remainder = re.sub(r"^\s*0*\d{1,2}\s*", "", text)
+        remainder = re.sub(r"^[PF]\s*", "", remainder, flags=re.I)
+        return len(re.findall(r"[가-힣A-Za-z]", remainder))
+
     # 동일 문구이면서 중심 좌표가 가까운 타일 중복은 높은 신뢰도 하나만 남기고 읽기 순서로 재번호화한다.
     @classmethod
     def _merge_lines(cls, primary: list[OcrLine], tiled: list[OcrLine]) -> list[OcrLine]:
@@ -442,8 +458,14 @@ class PaddleTextExtractor:
             duplicate_index = next((index for index, line in enumerate(selected) if cls._same_line(line, candidate)), None)
             if duplicate_index is None:
                 selected.append(candidate)
-            elif candidate.confidence > selected[duplicate_index].confidence:
-                selected[duplicate_index] = candidate
+            else:
+                existing = selected[duplicate_index]
+                candidate_is_better = (
+                    cls._receipt_item_number(existing.text) == cls._receipt_item_number(candidate.text)
+                    and cls._receipt_product_information_score(candidate.text) > cls._receipt_product_information_score(existing.text)
+                )
+                if candidate_is_better or candidate.confidence > existing.confidence:
+                    selected[duplicate_index] = candidate
         selected.sort(key=lambda line: (cls._box_center(line.box)[1], cls._box_center(line.box)[0]))
         return [OcrLine(index, line.text, line.confidence, line.box) for index, line in enumerate(selected, start=1)]
 
@@ -462,6 +484,10 @@ class PaddleTextExtractor:
         if not nearby:
             return False
         if left_text == right_text:
+            return True
+        left_number = cls._receipt_item_number(left.text)
+        right_number = cls._receipt_item_number(right.text)
+        if left_number is not None and left_number == right_number:
             return True
         shorter, longer = sorted((left_text, right_text), key=len)
         if len(shorter) >= 2 and shorter in longer:

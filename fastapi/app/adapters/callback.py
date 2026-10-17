@@ -17,7 +17,6 @@ from app.schemas import (
     ErrorBody,
     PublicStatus,
     ReceiptItem,
-    Source,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,9 +89,11 @@ def _callback_result(result: AnalysisResult) -> CallbackResult:
 
 # 내부 분석 결과에 수량과 중량이 함께 있으면 콜백에서도 둘 다 보존한다. 포장 중량이 있는 상품도
 # 여러 개 구매할 수 있으므로 WEIGHT 항목의 quantity를 제거하지 않으며, 규칙으로 보완한 수량도
-# 사용자가 검토할 후보값으로 전달한다. 인식하지 못해 규칙 기본값만 있는 수량과 중량은 0으로 보낸다.
+# 사용자가 검토할 후보값으로 전달한다. 파이프라인에 수량 객체가 없을 때만 0으로 보낸다.
+# BUSINESS_RULE 출처라도 영수증의 단가·금액 또는 기본 후보로 복원한 값이므로 콜백에서 다시
+# 0으로 덮어쓰지 않는다. 출처와 확인 필요 여부는 reviewReasons가 설명한다.
 def _callback_item(item: ReceiptItem) -> CallbackItem:
-    quantity = item.quantity.value if item.quantity is not None and item.quantity.source != Source.BUSINESS_RULE else 0
+    quantity = item.quantity.value if item.quantity is not None else 0
     if item.measure_type == "COUNT":
         weight = CallbackWeight(value=0, unit="NONE")
     else:
@@ -172,9 +173,10 @@ class CallbackDelivery:
                     return True
                 if response.status_code not in {429, 500, 502, 503, 504}:
                     logger.warning(
-                        "callback.rejected analysis_id=%s http_status=%s payload_summary=%s",
+                        "callback.rejected analysis_id=%s http_status=%s response_body=%s payload_summary=%s",
                         payload.analysis_id,
                         response.status_code,
+                        response.text.replace("\n", " ")[:2000],
                         _callback_log_summary(payload),
                     )
                     return False
