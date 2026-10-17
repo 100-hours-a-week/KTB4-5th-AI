@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 
 from app.adapters.callback import CallbackDelivery
+from app.adapters.callback_outbox import PostgresCallbackOutbox
 from app.adapters.product_catalog import PostgresProductCatalogLookup
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.adapters.shelf_life import PostgresShelfLifeLookup
@@ -19,7 +20,7 @@ from app.runtime import AnalysisRuntime
 from app.store import InMemoryAnalysisStore
 
 
-# 설정을 입력받아 저장소·원격 GPU Worker·DB 조회·콜백을 조립한 분석 런타임을 반환한다.
+# 설정을 입력받아 저장소·원격 GPU Worker·DB 조회·콜백·콜백 outbox를 조립한 분석 런타임을 반환한다.
 def build_runtime(settings: Settings) -> AnalysisRuntime:
     shelf_life_lookup = PostgresShelfLifeLookup(settings) if settings.database_url else None
     product_catalog_lookup = PostgresProductCatalogLookup(settings) if settings.database_url else None
@@ -35,7 +36,8 @@ def build_runtime(settings: Settings) -> AnalysisRuntime:
         max_entries=settings.analysis_result_max_entries,
     )
 
-    return AnalysisRuntime(settings, store, pipeline, CallbackDelivery(settings))
+    callback_outbox = PostgresCallbackOutbox(settings) if settings.callback_outbox_enabled else None
+    return AnalysisRuntime(settings, store, pipeline, CallbackDelivery(settings), callback_outbox)
 
 
 # 설정과 선택 런타임으로 미들웨어·예외 처리·router가 조립된 앱을 반환한다.

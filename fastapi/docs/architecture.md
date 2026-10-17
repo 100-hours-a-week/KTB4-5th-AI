@@ -121,6 +121,13 @@ sequenceDiagram
 `200`이 아니어도 `429`·`500`·`502`·`503`·`504`·연결 실패·타임아웃만 같은 본문을 재전송하고(최대 3회),
 `400`·`401`·`409` 등은 재전송하지 않는다. 재전송은 분석을 다시 실행하지 않는다.
 
+`CALLBACK_OUTBOX_ENABLED=true`이면 위처럼 바로 3회 보내지 않고, 콜백 본문을 PostgreSQL
+`receipt_ai.analysis_callback_outbox`에 저장한 뒤 별도 전달 루프가 보낸다. 재전송 조건은 같지만 횟수 제한 대신
+1초부터 두 배씩 최대 `CALLBACK_OUTBOX_MAX_RETRY_DELAY_SECONDS`(60초) 간격으로 `CALLBACK_OUTBOX_EXPIRES_SECONDS`(1일)
+동안 다시 보낸다. AI가 재시작해도 남은 콜백을 이어서 보내고, 분석 컨슈머는 콜백 응답을 기다리지 않는다.
+저장에 실패하면 그 콜백만 기존처럼 바로 보낸다. 저장하는 것은 콜백 본문뿐이라 재시작 뒤 GET 조회는 여전히
+`404`이고, 처리 중이던 분석은 사라진다([database.md](./database.md#완료-콜백-outbox-analysis_callback_outbox)).
+
 ## 동시성과 메모리 관리
 
 - **큐**: `AnalysisRuntime`([app/runtime.py](../app/runtime.py))이 `asyncio.Queue`(기본 용량
@@ -197,6 +204,7 @@ sequenceDiagram
 app/
 ├─ adapters/
 │  ├─ callback.py         # 백엔드 완료 콜백 (httpx.AsyncClient 재사용)
+│  ├─ callback_outbox.py  # 완료 콜백 outbox 저장·선점(PostgreSQL)
 │  ├─ remote_inference.py # GPU Worker 호출(S3 서명 URL 생성, 응답 검증)
 │  ├─ product_catalog.py  # product_knowledge/product_aliases 조회(정확+유사도)
 │  ├─ shelf_life.py       # shelf_life_rules 조회(부분 문자열 매칭)

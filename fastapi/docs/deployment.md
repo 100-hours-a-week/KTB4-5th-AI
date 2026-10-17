@@ -55,6 +55,7 @@ uv run pytest -q
 | 버전 기록 | `OLLAMA_MODEL`, `INPUT_CLASSIFIER_VERSION`, `OCR_VERSION` 등 | 응답 `modelTrace`에 기록할 Worker 모델 버전 |
 | DB | `DATABASE_URL`, `DATABASE_POOL_MAX_SIZE`, `REFERENCE_CACHE_MAX_SIZE`, `CATALOG_FUZZY_SIMILARITY_THRESHOLD` | 비우면 카탈로그·소비기한 조회 비활성화. `asyncpg`는 기본 설치됨 |
 | 콜백 | `CALLBACK_URL`, `CALLBACK_API_KEY`, `CALLBACK_TIMEOUT_SECONDS`, `CALLBACK_MAX_ATTEMPTS` | 운영에서는 URL·인증 키 필수. 로컬에서만 비우고 GET으로 확인 가능 |
+| 콜백 outbox | `CALLBACK_OUTBOX_ENABLED`(false), `CALLBACK_OUTBOX_MAX_RETRY_DELAY_SECONDS`(60), `CALLBACK_OUTBOX_EXPIRES_SECONDS`(86400) 등 | 켜면 완료 콜백을 DB에 저장하고 재시작 후에도 다시 보낸다. `analysis_callback_outbox` 테이블을 먼저 만들고 `DATABASE_URL`과 함께 켠다 |
 
 ## 원격 GPU Worker
 
