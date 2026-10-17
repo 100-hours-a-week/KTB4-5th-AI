@@ -1,4 +1,5 @@
 import logging
+import sys
 from datetime import UTC, date, datetime, timedelta
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
@@ -10,6 +11,7 @@ from app.config import Settings
 _log_queue: SimpleQueue[logging.LogRecord] | None = None
 _queue_handler: QueueHandler | None = None
 _file_handler: "DailyUtcFileHandler | None" = None
+_console_handler: logging.StreamHandler | None = None
 _queue_listener: QueueListener | None = None
 
 
@@ -72,7 +74,7 @@ class DailyUtcFileHandler(logging.Handler):
 
 # 설정을 받아 비동기 큐 logger와 날짜별 writer thread를 시작하고 현재 파일 경로를 반환한다.
 def configure_logging(settings: Settings) -> Path:
-    global _file_handler, _log_queue, _queue_handler, _queue_listener
+    global _console_handler, _file_handler, _log_queue, _queue_handler, _queue_listener
 
     log_dir = Path(settings.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -89,14 +91,24 @@ def configure_logging(settings: Settings) -> Path:
     _queue_handler.name = "ktb-fastapi-queue"
     _queue_handler.setLevel(settings.log_level)
 
+    formatter = UtcIsoFormatter("[%(asctime)s] %(levelname)s %(name)s %(message)s")
+
     _file_handler = DailyUtcFileHandler(log_dir, settings.log_retention_days)
     _file_handler.name = "ktb-fastapi-file-writer"
     _file_handler.setLevel(settings.log_level)
-    _file_handler.setFormatter(UtcIsoFormatter("[%(asctime)s] %(levelname)s %(name)s %(message)s"))
+    _file_handler.setFormatter(formatter)
+
+    # 컨테이너 환경의 ECS/CloudWatch에서도 날짜 파일과 동일한 로그를 확인할 수 있도록
+    # 같은 비동기 큐의 레코드를 표준 출력에도 기록한다.
+    _console_handler = logging.StreamHandler(sys.stdout)
+    _console_handler.name = "ktb-fastapi-console-writer"
+    _console_handler.setLevel(settings.log_level)
+    _console_handler.setFormatter(formatter)
 
     _queue_listener = QueueListener(
         _log_queue,
         _file_handler,
+        _console_handler,
         respect_handler_level=True,
     )
     root.addHandler(_queue_handler)
@@ -106,7 +118,7 @@ def configure_logging(settings: Settings) -> Path:
 
 # 로그 listener가 큐를 모두 처리할 때까지 기다린 뒤 handler와 날짜 파일을 닫는다.
 def shutdown_logging() -> None:
-    global _file_handler, _log_queue, _queue_handler, _queue_listener
+    global _console_handler, _file_handler, _log_queue, _queue_handler, _queue_listener
 
     root = logging.getLogger()
     if _queue_handler is not None:
@@ -115,6 +127,9 @@ def shutdown_logging() -> None:
         _queue_listener.stop()
     if _file_handler is not None:
         _file_handler.close()
+    if _console_handler is not None:
+        _console_handler.close()
+    _console_handler = None
     _log_queue = None
     _queue_handler = None
     _file_handler = None

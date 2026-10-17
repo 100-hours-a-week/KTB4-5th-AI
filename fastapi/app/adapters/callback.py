@@ -144,6 +144,11 @@ class CallbackDelivery:
         if self._settings.callback_api_key:
             headers["X-Internal-API-Key"] = self._settings.callback_api_key
         client = self._get_client()
+        logger.info(
+            "callback.payload.ready analysis_id=%s payload_summary=%s",
+            payload.analysis_id,
+            _callback_log_summary(payload),
+        )
         for attempt in range(1, self._settings.callback_max_attempts + 1):
             logger.info(
                 "callback.attempt analysis_id=%s attempt=%s",
