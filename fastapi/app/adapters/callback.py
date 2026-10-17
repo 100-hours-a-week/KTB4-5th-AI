@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from enum import StrEnum
 
 import httpx
 
@@ -20,6 +21,14 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+
+class CallbackSendOutcome(StrEnum):
+    DELIVERED = "DELIVERED"
+    RETRYABLE_FAILURE = "RETRYABLE_FAILURE"
+    REJECTED = "REJECTED"
 
 
 # 콜백 payload에서 이미지 위치·인증 정보 없이 분석 결과 추적에 필요한 필드만 요약해 반환한다.
@@ -141,51 +150,17 @@ class CallbackDelivery:
         if not self._settings.callback_url:
             logger.info("callback.skipped analysis_id=%s reason=no_url", payload.analysis_id)
             return False
-        headers: dict[str, str] = {}
-        if self._settings.callback_api_key:
-            headers["X-Internal-API-Key"] = self._settings.callback_api_key
-        client = self._get_client()
         logger.info(
             "callback.payload.ready analysis_id=%s payload_summary=%s",
             payload.analysis_id,
             _callback_log_summary(payload),
         )
         for attempt in range(1, self._settings.callback_max_attempts + 1):
-            logger.info(
-                "callback.attempt analysis_id=%s attempt=%s",
-                payload.analysis_id,
-                attempt,
-            )
-            try:
-                response = await client.post(
-                    self._settings.callback_url,
-                    json=payload.model_dump(by_alias=True, mode="json"),
-                    headers=headers,
-                )
-                if response.status_code == 200:
-                    logger.info(
-                        "callback.succeeded analysis_id=%s attempt=%s http_status=%s payload_summary=%s",
-                        payload.analysis_id,
-                        attempt,
-                        response.status_code,
-                        _callback_log_summary(payload),
-                    )
-                    return True
-                if response.status_code not in {429, 500, 502, 503, 504}:
-                    logger.warning(
-                        "callback.rejected analysis_id=%s http_status=%s response_body=%s payload_summary=%s",
-                        payload.analysis_id,
-                        response.status_code,
-                        response.text.replace("\n", " ")[:2000],
-                        _callback_log_summary(payload),
-                    )
-                    return False
-            except httpx.HTTPError:
-                logger.warning(
-                    "callback.request_failed analysis_id=%s attempt=%s",
-                    payload.analysis_id,
-                    attempt,
-                )
+            outcome = await self.send_once(payload, attempt)
+            if outcome == CallbackSendOutcome.DELIVERED:
+                return True
+            if outcome == CallbackSendOutcome.REJECTED:
+                return False
             if attempt < self._settings.callback_max_attempts:
                 await asyncio.sleep(min(0.25 * (2 ** (attempt - 1)), 2.0))
         logger.error(
@@ -195,6 +170,49 @@ class CallbackDelivery:
             _callback_log_summary(payload),
         )
         return False
+
+    # 완료 payload를 백엔드에 한 번 보내고 다시 보내야 하는지 판단한 결과를 반환한다.
+    async def send_once(self, payload: CallbackPayload, attempt: int) -> CallbackSendOutcome:
+        headers: dict[str, str] = {}
+        if self._settings.callback_api_key:
+            headers["X-Internal-API-Key"] = self._settings.callback_api_key
+        logger.info(
+            "callback.attempt analysis_id=%s attempt=%s",
+            payload.analysis_id,
+            attempt,
+        )
+        try:
+            response = await self._get_client().post(
+                self._settings.callback_url,
+                json=payload.model_dump(by_alias=True, mode="json"),
+                headers=headers,
+            )
+        except httpx.HTTPError:
+            logger.warning(
+                "callback.request_failed analysis_id=%s attempt=%s",
+                payload.analysis_id,
+                attempt,
+            )
+            return CallbackSendOutcome.RETRYABLE_FAILURE
+        if response.status_code == 200:
+            logger.info(
+                "callback.succeeded analysis_id=%s attempt=%s http_status=%s payload_summary=%s",
+                payload.analysis_id,
+                attempt,
+                response.status_code,
+                _callback_log_summary(payload),
+            )
+            return CallbackSendOutcome.DELIVERED
+        if response.status_code not in _RETRYABLE_HTTP_STATUSES:
+            logger.warning(
+                "callback.rejected analysis_id=%s http_status=%s response_body=%s payload_summary=%s",
+                payload.analysis_id,
+                response.status_code,
+                response.text.replace("\n", " ")[:2000],
+                _callback_log_summary(payload),
+            )
+            return CallbackSendOutcome.REJECTED
+        return CallbackSendOutcome.RETRYABLE_FAILURE
 
     # 기존 HTTP 클라이언트를 반환하거나 설정 timeout으로 새 클라이언트를 생성해 반환한다.
     def _get_client(self) -> httpx.AsyncClient:
