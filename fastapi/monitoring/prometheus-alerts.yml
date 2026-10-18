@@ -1,0 +1,47 @@
+groups:
+  - name: dameokja-ai
+    rules:
+      - alert: DameokjaAnalysisQueueBacklog
+        expr: dameokja_analysis_queue_oldest_wait_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI 분석 큐의 가장 오래된 작업이 60초 넘게 대기 중"
+
+      - alert: DameokjaAnalysisQueueNearCapacity
+        expr: dameokja_analysis_queue_size >= 80
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AI 분석 큐가 기본 용량 100건의 80% 이상"
+
+      - alert: DameokjaAnalysisFailures
+        expr: increase(dameokja_analysis_results_total{status="failed"}[10m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "최근 10분 동안 AI 분석 실패가 3건 초과"
+
+      - alert: DameokjaCallbackFailures
+        expr: increase(dameokja_callback_attempts_total{outcome=~"rejected|request_failed|exhausted"}[10m]) > 3
+        labels:
+          severity: critical
+        annotations:
+          summary: "최근 10분 동안 백엔드 콜백 실패가 3건 초과"
+
+      - alert: DameokjaWorkerFailures
+        expr: increase(dameokja_worker_requests_total{status="failed"}[10m]) > 3
+        labels:
+          severity: critical
+        annotations:
+          summary: "최근 10분 동안 GPU Worker 추론 실패가 3건 초과"
+
+      - alert: DameokjaWorkerP95LatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(dameokja_worker_stage_duration_seconds_bucket{stage="worker_total"}[10m]))) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU Worker P95 처리 시간이 10초 초과"

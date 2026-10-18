@@ -124,3 +124,23 @@ docker run --rm -p 8000:8000 --env-file .env ktb-receipt-ai
 `QueueListener` 스레드가 같은 형식으로 파일에 기록한다. 로그 시각과 파일 날짜는 UTC를
 사용하며, UTC 00:00 이후 첫 로그부터 새 `yyyy-mm-dd.log`에 기록한다. 날짜 로그는 기본
 14일 보관하고 서버 종료 시 남은 큐를 모두 기록한 뒤 파일을 닫는다.
+
+## 모니터링
+
+FastAPI는 내부 인증이 적용된 `GET /metrics`에서 Prometheus 형식의 지표를 제공한다. 수집기는
+분석 API와 동일하게 `X-Internal-API-Key`를 보내야 한다. 기본 Python 프로세스 CPU·메모리 지표와
+함께 다음 서비스 지표를 확인할 수 있다.
+
+- 접수 결과(`accepted`, `idempotent`, `queue_full`), 현재 큐 크기와 가장 오래된 대기 시간
+- 현재 처리 중인 분석 수, 큐 대기 시간, 실제 분석 시간, 완료·실패 수
+- 결과 저장소 크기, 결과당 상품 수, `RECOGNIZED`·`AI_ESTIMATED`·`NEEDS_REVIEW` 상품 수
+- 콜백 성공·재시도·거부·실패 수와 콜백 HTTP 지연 시간
+
+GPU 단계 지표는 Worker의 `GET /metrics`에서 별도로 수집한다. 두 endpoint 모두 분석 ID, 요청 ID,
+상품명과 OCR 원문을 metric label로 사용하지 않는다. Prometheus나 Grafana 수집 장애도 분석 흐름에는
+영향을 주지 않는다. 운영 대시보드에서는 FastAPI의 큐 지표와 Worker의 단계 지표를 같은 시간축으로
+비교해야 병목 위치를 구분할 수 있다.
+
+초기 경보 규칙은 [`monitoring/prometheus-alerts.yml`](../monitoring/prometheus-alerts.yml)에 있다.
+실제 부하와 사용자 허용 지연을 확인한 뒤 임계값을 조정한다. 주기적인 `/metrics` 수집 요청은 날짜별
+API 감사 로그에서 제외해 실제 분석 요청 로그가 묻히지 않도록 한다.

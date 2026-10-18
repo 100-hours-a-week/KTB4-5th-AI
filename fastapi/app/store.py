@@ -51,6 +51,10 @@ class InMemoryAnalysisStore:
         self._records: OrderedDict[str, AnalysisRecord] = OrderedDict()
         self._request_index: dict[str, str] = {}
 
+    # 현재 저장 중인 분석 레코드 수를 반환한다.
+    def __len__(self) -> int:
+        return len(self._records)
+
     # 새 ID와 요청을 받아 멱등 레코드와 신규 생성 여부를 반환한다.
     def create_or_get(self, analysis_id: str, request: AnalysisCreateRequest) -> tuple[AnalysisRecord, bool]:
         fingerprint = self._fingerprint(request)

@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+from time import perf_counter
 
 import httpx
 
 from app.config import Settings
+from app.monitoring.metrics import CALLBACK_ATTEMPTS, CALLBACK_DURATION
 from app.schemas import (
     AnalysisResult,
     AnalysisView,
@@ -139,6 +141,7 @@ class CallbackDelivery:
     # 완료 payload를 백엔드에 제한 재시도하고 최종 전달 성공 여부를 반환한다.
     async def try_send(self, payload: CallbackPayload) -> bool:
         if not self._settings.callback_url:
+            CALLBACK_ATTEMPTS.labels(outcome="skipped").inc()
             logger.info("callback.skipped analysis_id=%s reason=no_url", payload.analysis_id)
             return False
         headers: dict[str, str] = {}
@@ -157,12 +160,15 @@ class CallbackDelivery:
                 attempt,
             )
             try:
+                started_at = perf_counter()
                 response = await client.post(
                     self._settings.callback_url,
                     json=payload.model_dump(by_alias=True, mode="json"),
                     headers=headers,
                 )
                 if response.status_code == 200:
+                    CALLBACK_ATTEMPTS.labels(outcome="success").inc()
+                    CALLBACK_DURATION.labels(outcome="success").observe(perf_counter() - started_at)
                     logger.info(
                         "callback.succeeded analysis_id=%s attempt=%s http_status=%s payload_summary=%s",
                         payload.analysis_id,
@@ -172,6 +178,8 @@ class CallbackDelivery:
                     )
                     return True
                 if response.status_code not in {429, 500, 502, 503, 504}:
+                    CALLBACK_ATTEMPTS.labels(outcome="rejected").inc()
+                    CALLBACK_DURATION.labels(outcome="rejected").observe(perf_counter() - started_at)
                     logger.warning(
                         "callback.rejected analysis_id=%s http_status=%s response_body=%s payload_summary=%s",
                         payload.analysis_id,
@@ -180,7 +188,11 @@ class CallbackDelivery:
                         _callback_log_summary(payload),
                     )
                     return False
+                CALLBACK_ATTEMPTS.labels(outcome="retryable_status").inc()
+                CALLBACK_DURATION.labels(outcome="retryable_status").observe(perf_counter() - started_at)
             except httpx.HTTPError:
+                CALLBACK_ATTEMPTS.labels(outcome="request_failed").inc()
+                CALLBACK_DURATION.labels(outcome="request_failed").observe(perf_counter() - started_at)
                 logger.warning(
                     "callback.request_failed analysis_id=%s attempt=%s",
                     payload.analysis_id,
@@ -194,6 +206,7 @@ class CallbackDelivery:
             self._settings.callback_max_attempts,
             _callback_log_summary(payload),
         )
+        CALLBACK_ATTEMPTS.labels(outcome="exhausted").inc()
         return False
 
     # 기존 HTTP 클라이언트를 반환하거나 설정 timeout으로 새 클라이언트를 생성해 반환한다.

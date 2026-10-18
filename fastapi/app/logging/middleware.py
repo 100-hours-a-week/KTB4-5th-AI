@@ -25,6 +25,10 @@ class ApiAuditLogMiddleware:
 
         method = scope.get("method", "")
         path = scope.get("path", "")
+        # 주기적인 Prometheus scrape를 감사 로그에 쌓지 않아 실제 API 흐름을 찾기 쉽게 유지한다.
+        if path == "/metrics":
+            await self.app(scope, receive, send)
+            return
         trace_id = self._trace_id(scope)
         request_body = bytearray()
         response_body = bytearray()

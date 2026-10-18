@@ -14,7 +14,7 @@ from app.error_handlers import handle_app_error, handle_validation_error
 from app.errors import AppError
 from app.logging import ApiAuditLogMiddleware, configure_logging, shutdown_logging
 from app.pipeline import ReceiptAnalysisPipeline
-from app.routers import analyses, health, status
+from app.routers import analyses, health, metrics, status
 from app.runtime import AnalysisRuntime
 from app.store import InMemoryAnalysisStore
 
@@ -74,6 +74,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
     application.include_router(health.router)
     application.include_router(analyses.router)
     application.include_router(status.router)
+    application.include_router(metrics.router)
 
     # 요청 검증 오류는 공통 핸들러가 400 INVALID_REQUEST로 변환하므로 Swagger의 기본 422를 제거한다.
     def build_openapi_schema() -> dict:

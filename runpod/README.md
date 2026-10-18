@@ -137,6 +137,17 @@ RunPod 콘솔 또는 API의 책임이다.
 `/health/live`는 프로세스 생존을, `/health/ready`는 OCR·입력 분류·Gemma·상품 검출기가 실제 요청을
 받을 준비가 됐는지를 나타낸다.
 
+## 모니터링
+
+Worker는 `X-Worker-API-Key` 인증이 적용된 `GET /metrics`에서 Prometheus 형식 지표를 제공한다.
+기본 프로세스 CPU·메모리 지표 외에 현재 추론 수, 성공·실패 수, 다운로드·MobileNet·OCR 대기 및
+실행·상품 검출·LLM 대기 및 실행·전체 Worker 시간을 기록한다. Ollama 응답에 진단값이 있으면
+프롬프트/생성 토큰 누적량, 초당 토큰 처리량과 모델 로드 시간도 함께 기록한다.
+
+지표 label에는 분석 ID, 이미지 URL, OCR 원문이나 상품명을 넣지 않는다. 따라서 장시간 수집해도
+시계열 개수가 요청 수에 비례해 증가하지 않는다. Worker의 metrics 수집이 실패해도 추론 응답과
+FastAPI 콜백 흐름은 그대로 동작한다.
+
 ## 인증과 이미지 보안
 
 FastAPI는 `X-Worker-API-Key` 헤더를 보내고 Worker는 `WORKER_API_KEY`와 상수 시간 비교한다.

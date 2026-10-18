@@ -2,11 +2,24 @@ import asyncio
 import logging
 import secrets
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from app.adapters.callback import CallbackDelivery, build_callback_payload
 from app.analysis_graph import AnalysisGraph
 from app.config import Settings
 from app.errors import AnalysisQueueFull, AppError, ModelUnavailable
+from app.monitoring.metrics import (
+    ANALYSIS_ACTIVE,
+    ANALYSIS_DURATION,
+    ANALYSIS_ITEMS,
+    ANALYSIS_QUEUE_OLDEST_WAIT,
+    ANALYSIS_QUEUE_SIZE,
+    ANALYSIS_QUEUE_WAIT,
+    ANALYSIS_REQUESTS,
+    ANALYSIS_RESULTS,
+    ANALYSIS_STORE_SIZE,
+    ITEM_DISPLAY_STATUS,
+)
 from app.pipeline import ReceiptAnalysisPipeline
 from app.schemas import (
     AnalysisAccepted,
@@ -35,6 +48,7 @@ class AnalysisRuntime:
         self.consumer_tasks: list[asyncio.Task[None]] = []
         self.janitor_task: asyncio.Task[None] | None = None
         self.active_analysis_ids: set[str] = set()
+        self.queued_at: dict[str, datetime] = {}
         self.accepting = False
 
     # 하위 호환용 — 여러 컨슈머 중 하나(또는 없으면 None)를 반환한다. 전체 목록은
@@ -51,6 +65,7 @@ class AnalysisRuntime:
             for i in range(self.settings.analysis_consumer_count)
         ]
         self.janitor_task = asyncio.create_task(self._janitor(), name="analysis-janitor")
+        self.refresh_metrics()
         logger.info(
             "runtime.started queue_capacity=%s consumers=%s",
             self.queue.maxsize,
@@ -75,6 +90,8 @@ class AnalysisRuntime:
                     await task
         await self.callback.close()
         await self.pipeline.close()
+        ANALYSIS_ACTIVE.set(0)
+        ANALYSIS_QUEUE_SIZE.set(0)
         logger.info("runtime.stopped")
 
     # 검증된 분석 요청을 받아 멱등 레코드를 만들고 큐 접수 결과를 반환한다.
@@ -86,6 +103,9 @@ class AnalysisRuntime:
         if is_new:
             try:
                 self.queue.put_nowait(record.analysis_id)
+                self.queued_at[record.analysis_id] = record.submitted_at
+                ANALYSIS_REQUESTS.labels(outcome="accepted").inc()
+                self.refresh_metrics()
                 logger.info(
                     "analysis.queued analysis_id=%s request_id=%s queue_size=%s",
                     record.analysis_id,
@@ -94,9 +114,14 @@ class AnalysisRuntime:
                 )
             except asyncio.QueueFull as exc:
                 self.store.remove(record.analysis_id)
+                self.queued_at.pop(record.analysis_id, None)
+                ANALYSIS_REQUESTS.labels(outcome="queue_full").inc()
+                self.refresh_metrics()
                 logger.warning("analysis.queue_full request_id=%s", request.request_id)
                 raise AnalysisQueueFull() from exc
         else:
+            ANALYSIS_REQUESTS.labels(outcome="idempotent").inc()
+            self.refresh_metrics()
             logger.info(
                 "analysis.idempotent_hit analysis_id=%s request_id=%s status=%s",
                 record.analysis_id,
@@ -116,7 +141,11 @@ class AnalysisRuntime:
     async def _consume(self) -> None:
         while True:
             analysis_id = await self.queue.get()
+            self.queued_at.pop(analysis_id, None)
             self.active_analysis_ids.add(analysis_id)
+            record = self.store.get_record(analysis_id)
+            ANALYSIS_QUEUE_WAIT.observe(max((datetime.now(UTC) - record.submitted_at).total_seconds(), 0))
+            self.refresh_metrics()
             logger.info(
                 "analysis.dequeued analysis_id=%s queue_size=%s", analysis_id, self.queue.qsize()
             )
@@ -130,9 +159,12 @@ class AnalysisRuntime:
                         "analysis.stage analysis_id=%s stage=%s", current_analysis_id, stage
                     )
 
-                record = self.store.get_record(analysis_id)
                 result = await self.analysis_graph.run(record, set_stage)
                 view = self.store.complete(analysis_id, result)
+                ANALYSIS_RESULTS.labels(status="completed").inc()
+                ANALYSIS_ITEMS.observe(len(result.items))
+                for item in result.items:
+                    ITEM_DISPLAY_STATUS.labels(display_status=item.display_status.value).inc()
                 logger.info(
                     "analysis.completed analysis_id=%s request_id=%s item_count=%s",
                     analysis_id,
@@ -141,6 +173,7 @@ class AnalysisRuntime:
                 )
             except AppError as exc:
                 view = self.store.fail(analysis_id, self._error_body(exc))
+                ANALYSIS_RESULTS.labels(status="failed").inc()
                 logger.warning(
                     "analysis.failed analysis_id=%s error_code=%s retryable=%s",
                     analysis_id,
@@ -158,9 +191,16 @@ class AnalysisRuntime:
                         retryAfterMs=5000,
                     ),
                 )
+                ANALYSIS_RESULTS.labels(status="failed").inc()
             finally:
+                completed_record = self.store.get_record(analysis_id)
+                if completed_record.started_at is not None and completed_record.completed_at is not None:
+                    ANALYSIS_DURATION.labels(status=completed_record.status.value.lower()).observe(
+                        max((completed_record.completed_at - completed_record.started_at).total_seconds(), 0)
+                    )
                 self.active_analysis_ids.discard(analysis_id)
                 self.queue.task_done()
+                self.refresh_metrics()
 
             if view.completed_at is not None:
                 # 콜백 변환·전송 오류가 소비자 코루틴까지 끝내면 이후 큐 작업이 영원히 처리되지 않는다.
@@ -184,7 +224,16 @@ class AnalysisRuntime:
         while True:
             await asyncio.sleep(min(max(self.settings.analysis_result_ttl_seconds / 4, 30), 300))
             self.store.prune()
+            self.refresh_metrics()
             logger.debug("analysis.store.pruned")
+
+    # 큐·처리 중·결과 저장소의 현재 크기를 Prometheus gauge에 반영한다.
+    def refresh_metrics(self) -> None:
+        ANALYSIS_QUEUE_SIZE.set(self.queue.qsize())
+        now = datetime.now(UTC)
+        ANALYSIS_QUEUE_OLDEST_WAIT.set(max((now - min(self.queued_at.values())).total_seconds(), 0) if self.queued_at else 0)
+        ANALYSIS_ACTIVE.set(len(self.active_analysis_ids))
+        ANALYSIS_STORE_SIZE.set(len(self.store))
 
     @staticmethod
     # 내부 AppError를 API와 콜백에 사용하는 ErrorBody로 변환해 반환한다.

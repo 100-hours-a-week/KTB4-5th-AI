@@ -1,16 +1,20 @@
+import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Protocol
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 
 from app.config import Settings, get_settings
 from app.error_handlers import handle_app_error, handle_validation_error
 from app.errors import AppError, UnauthorizedService
+from app.monitoring.metrics import WORKER_INFLIGHT, WORKER_REQUESTS, observe_diagnostics, render_metrics
 from app.schemas import RemoteInferenceRequest, RemoteInferenceResponse
 from gpu_worker.engine import GpuInferenceEngine
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerEngine(Protocol):
@@ -72,7 +76,25 @@ def create_worker_app(settings: Settings | None = None, engine: WorkerEngine | N
 
     @application.post("/internal/v1/infer", response_model=RemoteInferenceResponse, dependencies=[Depends(authenticate_worker)])
     async def infer(payload: RemoteInferenceRequest, current_engine: Annotated[WorkerEngine, Depends(get_engine)]) -> RemoteInferenceResponse:
-        return await current_engine.infer(payload)
+        WORKER_INFLIGHT.inc()
+        try:
+            result = await current_engine.infer(payload)
+            try:
+                observe_diagnostics(result.diagnostics)
+            except Exception:
+                logger.exception("worker.metrics.observe_failed")
+            WORKER_REQUESTS.labels(status="success").inc()
+            return result
+        except Exception:
+            WORKER_REQUESTS.labels(status="failed").inc()
+            raise
+        finally:
+            WORKER_INFLIGHT.dec()
+
+    @application.get("/metrics", include_in_schema=False, dependencies=[Depends(authenticate_worker)])
+    async def metrics() -> Response:
+        payload, content_type = render_metrics()
+        return Response(content=payload, media_type=content_type)
 
     return application
 
