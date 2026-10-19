@@ -88,12 +88,11 @@ jobs:
       image: ${{ needs.build.outputs.image }}
 
   request-prod:
-    name: 앱 prod 승인 및 CLOUD 승인 요청
+    name: CLOUD prod 승인 요청
     needs: [build, deploy-stage]
-    if: github.event_name == 'push' && github.ref_name == 'main' && vars.CD_ENABLED == 'true'
+    if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    environment: prod
     steps:
       - name: CLOUD 승인 워크플로 실행
         env:
@@ -113,15 +112,14 @@ jobs:
 
   deploy:
     name: CLOUD prod ECS 배포 결과 확인
-    # 앱 저장소 승인 후 CLOUD가 prod 승인과 ECS 배포를 담당한다.
+    # stage 성공 후 CLOUD에서 최종 prod 승인과 ECS 배포를 담당한다.
     needs: [build, request-prod]
-    # dev는 v2(ECS)로 전환되어 deploy-v2가 배포한다. 이 job은 prod(main)를 명시적으로 활성화했을 때만 배포한다.
+    # main의 stage 배포가 성공하면 별도 활성화 변수 없이 CLOUD 배포 결과를 확인한다.
     if: >-
       github.event_name == 'push' &&
-      github.ref_name == 'main' && vars.CD_ENABLED == 'true'
+      github.ref_name == 'main'
     runs-on: ubuntu-24.04
     timeout-minutes: 50
-    # 값은 Environment가 아니라 브랜치별 Repository 설정에서 고른다 (Environment는 승인용).
     concurrency:
       group: deploy-${{ github.ref_name }}
       cancel-in-progress: false
