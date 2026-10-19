@@ -109,41 +109,11 @@ jobs:
             --arg run_attempt "$RUN_ATTEMPT" --arg image "$IMAGE" \
             '{ref:"main", inputs:{repository:$repository, run_id:$run_id, run_attempt:$run_attempt, image:$image}}' |
             gh api --method POST repos/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/prod-approval.yml/dispatches --input -
-
-  deploy:
-    name: CLOUD prod ECS 배포 결과 확인
-    # stage 성공 후 CLOUD에서 최종 prod 승인과 ECS 배포를 담당한다.
-    needs: [build, request-prod]
-    # main의 stage 배포가 성공하면 별도 활성화 변수 없이 CLOUD 배포 결과를 확인한다.
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == 'main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 50
-    concurrency:
-      group: deploy-${{ github.ref_name }}
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    steps:
-      - name: CLOUD prod ECS 배포 완료 대기
-        env:
-          GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
-          EXPECTED_TITLE: prod ${{ github.event.repository.name }} ${{ github.run_id }}.${{ github.run_attempt }} ${{ needs.build.outputs.image }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$GH_TOKEN"
-          endpoint="repos/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/prod-approval.yml/runs?event=workflow_dispatch&branch=main&per_page=100"
-          for ((i=0; i<180; i++)); do
-            run=$(gh api "$endpoint" | jq -c --arg title "$EXPECTED_TITLE" '[.workflow_runs[] | select(.display_title == $title)] | sort_by(.id) | last // {}')
-            status=$(jq -r ' .status // "missing"' <<< "$run")
-            if [[ "$status" == completed ]]; then
-              [[ $(jq -r .conclusion <<< "$run") == success ]] || { echo "CLOUD prod ECS 배포 실패 또는 취소"; exit 1; }
-              echo "CLOUD prod ECS 배포 완료"
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "CLOUD prod ECS 배포 대기 시간 초과. CLOUD 실행 상태를 확인하세요."
-          exit 1
+          # 앱 실행은 요청 접수까지 담당하고 승인·운영 배포 결과는 CLOUD에서 확인한다.
+          {
+            echo '### CLOUD prod 배포 요청 접수 완료'
+            echo 'stage 배포와 요청 전달이 완료되었습니다. prod 배포 완료를 뜻하지 않습니다.'
+            echo '[CLOUD 승인 및 배포 실행 확인](https://github.com/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/prod-approval.yml)'
+            printf -- '- 요청 실행: `%s.%s`\n' "$RUN_ID" "$RUN_ATTEMPT"
+            printf -- '- 이미지: `%s`\n' "$IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
