@@ -46,7 +46,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: fastapi
-          # v2 dev(t3)·stage(m7i) AI 인스턴스용
+          # dev·stage·prod FastAPI 인스턴스용 AMD64 이미지를 한 번만 빌드한다.
           platforms: linux/amd64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
@@ -86,3 +86,66 @@ jobs:
       env: stage
       service: ai
       image: ${{ needs.build.outputs.image }}
+
+  request-prod:
+    name: 앱 prod 승인 및 CLOUD 승인 요청
+    needs: [build, deploy-stage]
+    if: github.event_name == 'push' && github.ref_name == 'main' && vars.CD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: prod
+    steps:
+      - name: CLOUD 승인 워크플로 실행
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          SOURCE_REPO: ${{ github.event.repository.name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo "CLOUD_DISPATCH_TOKEN Secret이 필요합니다."; exit 1; }
+          jq -n --arg repository "$SOURCE_REPO" --arg run_id "$RUN_ID" \
+            --arg run_attempt "$RUN_ATTEMPT" --arg image "$IMAGE" \
+            '{ref:"main", inputs:{repository:$repository, run_id:$run_id, run_attempt:$run_attempt, image:$image}}' |
+            gh api --method POST repos/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/prod-approval.yml/dispatches --input -
+
+  deploy:
+    name: CLOUD prod ECS 배포 결과 확인
+    # 앱 저장소 승인 후 CLOUD가 prod 승인과 ECS 배포를 담당한다.
+    needs: [build, request-prod]
+    # dev는 v2(ECS)로 전환되어 deploy-v2가 배포한다. 이 job은 prod(main)를 명시적으로 활성화했을 때만 배포한다.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_name == 'main' && vars.CD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    # 값은 Environment가 아니라 브랜치별 Repository 설정에서 고른다 (Environment는 승인용).
+    concurrency:
+      group: deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: CLOUD prod ECS 배포 완료 대기
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          EXPECTED_TITLE: prod ${{ github.event.repository.name }} ${{ github.run_id }}.${{ github.run_attempt }} ${{ needs.build.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          endpoint="repos/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/prod-approval.yml/runs?event=workflow_dispatch&branch=main&per_page=100"
+          for ((i=0; i<180; i++)); do
+            run=$(gh api "$endpoint" | jq -c --arg title "$EXPECTED_TITLE" '[.workflow_runs[] | select(.display_title == $title)] | sort_by(.id) | last // {}')
+            status=$(jq -r ' .status // "missing"' <<< "$run")
+            if [[ "$status" == completed ]]; then
+              [[ $(jq -r .conclusion <<< "$run") == success ]] || { echo "CLOUD prod ECS 배포 실패 또는 취소"; exit 1; }
+              echo "CLOUD prod ECS 배포 완료"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "CLOUD prod ECS 배포 대기 시간 초과. CLOUD 실행 상태를 확인하세요."
+          exit 1
