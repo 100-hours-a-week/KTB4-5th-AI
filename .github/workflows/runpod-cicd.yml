@@ -91,6 +91,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"image\": \"${IMAGE}\"}" > /dev/null
       - name: Worker 준비 대기
+        if: env.POD_STATUS == 'RUNNING'
         # 모델 다운로드·워밍업 때문에 준비까지 몇 분 걸린다.
         run: |
           for _ in $(seq 1 75); do

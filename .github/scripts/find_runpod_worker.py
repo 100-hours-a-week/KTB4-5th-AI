@@ -26,7 +26,7 @@ except (urllib.error.URLError, json.JSONDecodeError) as exc:
 candidates = []
 for pod in pods:
     match = pattern.fullmatch(str(pod.get("name", "")))
-    if not match or pod.get("status") != "RUNNING":
+    if not match or pod.get("status") not in {"RUNNING", "EXITED"}:
         continue
     if template_id and pod.get("template") != template_id:
         continue
@@ -44,18 +44,23 @@ if len(highest) != 1:
     raise SystemExit(f"v{highest_version} Worker가 여러 개라 배포 대상을 결정할 수 없습니다: {ids}")
 
 pod_id = highest[0][2]
-health_url = f"https://{pod_id}-{worker_port}.proxy.runpod.net/health/ready"
-health_request = urllib.request.Request(
-    health_url,
-    headers={"Accept": "application/json", "User-Agent": "ktb-runpod-deploy/1.0"},
+pod_status = next(
+    str(pod.get("status")) for pod in pods if str(pod.get("id")) == pod_id
 )
-try:
-    with urllib.request.urlopen(health_request, timeout=30) as response:
-        ready = bool(json.load(response).get("ready"))
-except (urllib.error.URLError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"선택한 Worker의 준비 상태를 확인하지 못했습니다: {exc}") from exc
-if not ready:
-    raise SystemExit(f"선택한 v{highest_version} Worker가 아직 준비되지 않았습니다: {pod_id}")
+health_url = f"https://{pod_id}-{worker_port}.proxy.runpod.net/health/ready"
+if pod_status == "RUNNING":
+    health_request = urllib.request.Request(
+        health_url,
+        headers={"Accept": "application/json", "User-Agent": "ktb-runpod-deploy/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(health_request, timeout=30) as response:
+            ready = bool(json.load(response).get("ready"))
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"선택한 Worker의 준비 상태를 확인하지 못했습니다: {exc}") from exc
+    if not ready:
+        raise SystemExit(f"선택한 v{highest_version} Worker가 아직 준비되지 않았습니다: {pod_id}")
 
 print(f"POD_ID={pod_id}")
+print(f"POD_STATUS={pod_status}")
 print(f"WORKER_PORT={worker_port}")
