@@ -13,7 +13,10 @@ worker_port = int(os.environ.get("WORKER_PORT", "9000"))
 pattern = re.compile(rf"^{re.escape(prefix)}-v(\d+)$")
 request = urllib.request.Request(
     "https://api.runpod.io/v2/pods?limit=1000",
-    headers={"Authorization": f"Bearer {api_key}"},
+    headers={
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "ktb-runpod-deploy/1.0",
+    },
 )
 
 try:
@@ -44,8 +47,12 @@ if len(highest) != 1:
 
 pod_id = highest[0][2]
 health_url = f"https://{pod_id}-{worker_port}.proxy.runpod.net/health/ready"
+health_request = urllib.request.Request(
+    health_url,
+    headers={"Accept": "application/json", "User-Agent": "ktb-runpod-deploy/1.0"},
+)
 try:
-    with urllib.request.urlopen(health_url, timeout=30) as response:
+    with urllib.request.urlopen(health_request, timeout=30) as response:
         ready = bool(json.load(response).get("ready"))
 except (urllib.error.URLError, json.JSONDecodeError) as exc:
     raise SystemExit(f"선택한 Worker의 준비 상태를 확인하지 못했습니다: {exc}") from exc
