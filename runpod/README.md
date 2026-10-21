@@ -183,3 +183,4 @@ FastAPI의 `REMOTE_INFERENCE_API_KEY`와 Worker의 `WORKER_API_KEY`만 같은 �
 Worker의 목표는 GPU 추론을 독립적으로 확장·교체할 수 있게 만드는 것이다. 모델 제공자가 RunPod에서
 다른 GPU 환경으로 바뀌더라도 `/internal/v1/infer` 계약을 유지하면 FastAPI와 백엔드는 영향을 받지
 않는다.
+<!-- Worker 배포 대상 탐색 스크립트 변경 후 재배포 트리거: 2026-10-21 -->
