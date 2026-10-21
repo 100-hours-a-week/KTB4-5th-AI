@@ -2,9 +2,11 @@ name: RunPod 예약 시작 및 정지
 
 on:
   schedule:
-    # GitHub Actions cron은 UTC 기준이다. 아래 시각은 한국 시간 08:30, 18:00이다.
-    - cron: "30 23 * * *"
-    - cron: "0 9 * * *"
+    # GitHub Actions cron은 지연되거나 한 회가 누락될 수 있어 5분 간격의 실행 창을 둔다.
+    # UTC 23:30~00:25는 한국 시간 08:30~09:25, UTC 09:00~09:25는 18:00~18:25다.
+    - cron: "30-59/5 23 * * *"
+    - cron: "0-25/5 0 * * *"
+    - cron: "0-25/5 9 * * *"
   workflow_dispatch:
     inputs:
       action:
@@ -48,10 +50,10 @@ jobs:
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             action="${MANUAL_ACTION}"
-          elif [[ "${SCHEDULE_EXPRESSION}" == "30 23 * * *" ]]; then
-            action="start"
-          else
+          elif [[ "${SCHEDULE_EXPRESSION}" == "0-25/5 9 * * *" ]]; then
             action="stop"
+          else
+            action="start"
           fi
           echo "action=${action}" >> "$GITHUB_OUTPUT"
       - name: RunPod 제어
