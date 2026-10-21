@@ -100,6 +100,7 @@ class RemoteInferenceClient:
             input_classifier_ms=parsed.diagnostics.get("inputClassifierMs"),
             ocr_queue_wait_ms=parsed.diagnostics.get("ocrQueueWaitMs"),
             ocr_ms=parsed.diagnostics.get("ocrMs"),
+            product_detection_ms=parsed.diagnostics.get("productDetectionMs"),
             llm_queue_wait_ms=parsed.diagnostics.get("llmQueueWaitMs"),
             llm_ms=parsed.diagnostics.get("llmMs"),
             worker_total_ms=parsed.diagnostics.get("workerTotalMs"),

@@ -32,6 +32,7 @@ from app.domain.receipt_rules import (
     sanitize_lines,
     storage_for_category,
 )
+from app.monitoring.metrics import observe_remote_diagnostics
 from app.schemas import (
     AnalysisResult,
     Category,
@@ -155,6 +156,7 @@ class ReceiptAnalysisPipeline:
         document = bundle.document
         remote_model_candidates = bundle.model_candidates
         remote_diagnostics = bundle.diagnostics
+        observe_remote_diagnostics(remote_diagnostics)
         prediction = bundle.input_prediction
         if prediction is not None and request.input_hint == InputHint.AUTO:
             inferred_input_type = prediction.document_type if prediction.accepted else None
@@ -163,7 +165,7 @@ class ReceiptAnalysisPipeline:
         logger.info(
             "pipeline.remote_inference.finished " + log_context + " line_count=%s model_candidate_count=%s elapsed_ms=%.2f "
             "worker_queue_wait_ms=%s download_ms=%s input_classifier_ms=%s ocr_queue_wait_ms=%s ocr_ms=%s "
-            "llm_queue_wait_ms=%s llm_ms=%s worker_total_ms=%s input_classifier_active=%s",
+            "product_detection_ms=%s llm_queue_wait_ms=%s llm_ms=%s worker_total_ms=%s input_classifier_active=%s",
             record.analysis_id,
             request.request_id,
             len(safe_lines),
@@ -174,6 +176,7 @@ class ReceiptAnalysisPipeline:
             remote_diagnostics.input_classifier_ms,
             remote_diagnostics.ocr_queue_wait_ms,
             remote_diagnostics.ocr_ms,
+            remote_diagnostics.product_detection_ms,
             remote_diagnostics.llm_queue_wait_ms,
             remote_diagnostics.llm_ms,
             remote_diagnostics.worker_total_ms,

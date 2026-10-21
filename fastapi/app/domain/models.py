@@ -63,6 +63,7 @@ class PipelineDiagnostics:
     input_classifier_ms: float | None = None
     ocr_queue_wait_ms: float | None = None
     ocr_ms: float | None = None
+    product_detection_ms: float | None = None
     llm_queue_wait_ms: float | None = None
     llm_ms: float | None = None
     worker_total_ms: float | None = None

@@ -141,6 +141,14 @@ GPU 단계 지표는 Worker의 `GET /metrics`에서 별도로 수집한다. 두 
 영향을 주지 않는다. 운영 대시보드에서는 FastAPI의 큐 지표와 Worker의 단계 지표를 같은 시간축으로
 비교해야 병목 위치를 구분할 수 있다.
 
+FastAPI는 정상 수신한 Worker 응답의 `diagnostics`도 자체 `/metrics`에 다시 집계한다. 따라서 AWS
+수집기는 RunPod endpoint를 직접 호출하지 않고도 `dameokja_remote_worker_stage_duration_seconds`,
+`dameokja_remote_llm_tokens_total`, `dameokja_remote_llm_throughput_tokens_per_second`,
+`dameokja_remote_llm_model_load_duration_seconds`에서 GPU 단계 시간과 LLM 토큰 사용량을 확인할 수
+있다. 이 계측은 이미 응답에 포함된 숫자를 메모리 지표에 반영할 뿐이며 추가 추론·이미지 다운로드·DB
+저장을 수행하지 않는다. 재시도로 Worker 추론이 다시 수행되면 실제로 소비된 자원을 반영하기 위해 각
+성공 응답의 진단값을 모두 집계한다.
+
 초기 경보 규칙은 [`monitoring/prometheus-alerts.yml`](../monitoring/prometheus-alerts.yml)에 있다.
 실제 부하와 사용자 허용 지연을 확인한 뒤 임계값을 조정한다. 주기적인 `/metrics` 수집 요청은 날짜별
 API 감사 로그에서 제외해 실제 분석 요청 로그가 묻히지 않도록 한다.
