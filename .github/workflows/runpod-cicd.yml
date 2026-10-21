@@ -66,6 +66,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    concurrency:
+      group: runpod-pod-control
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
         with:

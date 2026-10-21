@@ -182,8 +182,6 @@ def start() -> None:
     try:
         pod_action(pod_id, "start")
         wait_status(pod_id, {"RUNNING"})
-        wait_ready(pod_id)
-        print(f"시작 완료: {pod_id}")
     except (ApiError, RuntimeError) as exc:
         print(f"기존 Pod 시작 실패, Auto Migration 시도: {exc}", file=sys.stderr)
         last_error = exc
@@ -198,6 +196,10 @@ def start() -> None:
                 if attempt < 3:
                     time.sleep(POLL_SECONDS * attempt)
         raise RuntimeError(f"Auto Migration 3회 실패: {last_error}") from last_error
+    # 컨테이너나 모델 준비 실패는 GPU 자리 부족을 뜻하지 않는다. 이미 실행된 Pod를
+    # 마이그레이션하지 않고 외부 재시도 루프가 같은 Pod의 readiness를 다시 확인하게 한다.
+    wait_ready(pod_id)
+    print(f"시작 완료: {pod_id}")
 
 
 def stop() -> None:

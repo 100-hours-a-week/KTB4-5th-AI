@@ -18,7 +18,8 @@ on:
           - stop
 
 concurrency:
-  group: runpod-schedule
+  # Worker 이미지 교체와 시작·정지가 같은 Pod를 동시에 수정하지 않게 직렬화한다.
+  group: runpod-pod-control
   cancel-in-progress: false
 
 permissions:

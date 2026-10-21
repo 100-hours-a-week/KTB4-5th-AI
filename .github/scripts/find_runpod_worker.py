@@ -1,10 +1,8 @@
 import json
 import os
 import re
-import sys
 import urllib.error
 import urllib.request
-
 
 api_key = os.environ["RUNPOD_API_KEY"]
 prefix = os.environ.get("POD_NAME_PREFIX", "dameokja-ai-worker")
