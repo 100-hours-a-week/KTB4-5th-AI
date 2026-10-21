@@ -4,10 +4,10 @@ name: RunPod Worker CI-CD
 on:
   pull_request:
     branches: [main]
-    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml"]
+    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml", ".github/scripts/find_runpod_worker.py"]
   push:
     branches: [main]
-    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml"]
+    paths: ["runpod/**", ".github/workflows/runpod-cicd.yml", ".github/scripts/find_runpod_worker.py"]
 
 permissions:
   contents: read
