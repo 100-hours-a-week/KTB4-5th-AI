@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     remote_inference_api_key: str | None = None
     remote_inference_timeout_seconds: float = Field(default=180.0, gt=0)
     remote_image_base_url: str | None = None
+    runpod_api_key: str | None = None
+    runpod_pod_name_prefix: str | None = None
+    runpod_template_id: str | None = None
+    runpod_worker_port: int = Field(default=9000, ge=1, le=65535)
+    runpod_discovery_ttl_seconds: float = Field(default=60.0, ge=5, le=3600)
 
     image_source: Literal["s3", "local"] = "local"
     s3_bucket: str | None = None
@@ -79,11 +84,17 @@ class Settings(BaseSettings):
             raise ValueError("production에서는 CALLBACK_API_KEY가 필요합니다")
         if self.image_source == "s3" and not self.s3_bucket:
             raise ValueError("IMAGE_SOURCE=s3이면 S3_BUCKET이 필요합니다")
-        if self.app_env == "production" and not self.remote_inference_url:
-            raise ValueError("production에서는 REMOTE_INFERENCE_URL이 필요합니다")
+        has_runpod_discovery = bool(self.runpod_api_key and self.runpod_pod_name_prefix)
+        if self.app_env == "production" and not self.remote_inference_url and not has_runpod_discovery:
+            raise ValueError(
+                "production에서는 REMOTE_INFERENCE_URL 또는 "
+                "RUNPOD_API_KEY와 RUNPOD_POD_NAME_PREFIX가 필요합니다"
+            )
+        if bool(self.runpod_api_key) != bool(self.runpod_pod_name_prefix):
+            raise ValueError("Runpod 자동 탐색에는 RUNPOD_API_KEY와 RUNPOD_POD_NAME_PREFIX가 모두 필요합니다")
         if self.app_env == "production" and not self.remote_inference_api_key:
             raise ValueError("production에서는 REMOTE_INFERENCE_API_KEY가 필요합니다")
-        if self.remote_inference_url and self.image_source == "local" and not self.remote_image_base_url:
+        if (self.remote_inference_url or has_runpod_discovery) and self.image_source == "local" and not self.remote_image_base_url:
             raise ValueError("로컬 이미지 소스로 GPU Worker를 호출하려면 REMOTE_IMAGE_BASE_URL이 필요합니다")
         return self
 

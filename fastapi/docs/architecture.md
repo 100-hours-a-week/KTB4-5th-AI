@@ -105,16 +105,17 @@ sequenceDiagram
 콜백 본문은 백엔드가 소유한 "재고 인식 결과 콜백 API 명세"
 (`POST /api/v1/internal/image-analyses/callback`, 헤더 `X-Internal-API-Key`)를 따른다. GET 조회 응답의
 `result`를 [app/adapters/callback.py](../app/adapters/callback.py)의 `build_callback_payload()`가 평면
-구조로 변환한다.
+구조로 변환한다. 인식하지 못한 수량·중량은 `null` 대신 `0`(단위는 `NONE`)으로 보내며, 값의 출처와
+확인 필요 여부는 `reviewReasons`로 전달한다.
 
 | 콜백 필드 | GET 응답에서 가져오는 값 |
 | --- | --- |
 | `result.documentType` | `documentType.value` (`RECEIPT`, `PRODUCT`, `OTHER`) |
 | `items[].name` | `name.value`, 비었으면 `name.normalizedValue`, 둘 다 없으면 `null` |
 | `items[].category`·`storageType`·`measureType` | 각 값 그대로 |
-| `items[].quantity` | `COUNT`이고 OCR로 읽은 수량만. 규칙 기본값(`BUSINESS_RULE`)과 `WEIGHT` 항목은 `null` |
-| `items[].displayStatus` | 그대로. 단 `COUNT` 수량이나 `WEIGHT` 중량이 `null`이 되면 `NEEDS_REVIEW` |
-| `items[].weight` | `COUNT`이면 `{value: null, unit: NONE}`, `WEIGHT`이면 `{value, unit}`. 0 이하 중량은 `{null, null}` |
+| `items[].quantity` | `quantity.value` 그대로(`COUNT`·`WEIGHT` 모두). 규칙으로 정한 기본 수량(`BUSINESS_RULE`)도 사용자가 검토할 후보값으로 보낸다. 수량 객체가 없으면 `0` |
+| `items[].displayStatus` | 그대로. 단 `COUNT`인데 수량이 `0`이거나 `WEIGHT`인데 중량이 `0`이면 `NEEDS_REVIEW` |
+| `items[].weight` | `COUNT`이면 `{value: 0, unit: NONE}`, `WEIGHT`이면 `{value, unit}`. 중량을 읽지 못했거나 0 이하이면 `{value: 0, unit: NONE}` |
 | `items[].expiration` | `date`, `dateType`, `estimatedRange`만 |
 | `error` | 그대로 (`code`, `message`, `retryable`, `retryAfterMs`) |
 
@@ -252,7 +253,8 @@ app/
 
 ## 로깅
 
-`analysisId`/`requestId` 기준으로 `queued → dequeued → image_load → ocr → document_checked
-→ classification(+fallback) → validation → completed/failed → callback` 순서를 추적한다.
-이미지 bytes, OCR 원문, 상세 식재료명은 일반 로그에 남기지 않는다. 모든 HTTP 요청·응답은
+`analysisId`/`requestId` 기준으로 `queued → dequeued → remote_inference → document_checked
+→ rows.reconstructed → classification → validation → completed/failed → callback` 순서를 추적한다.
+이미지 bytes와 OCR 원문은 일반 로그에 남기지 않는다. 콜백 장애 추적을 위해 백엔드로 보낸 상품 후보
+요약은 기록하며, 세부 기준은 [deployment.md의 로그 기록 정책](./deployment.md#로그-기록-정책)을 따른다. 모든 HTTP 요청·응답은
 `X-Request-ID`(없으면 서버가 생성한 `traceId`) 기준으로 감사 로그 두 줄을 남긴다.

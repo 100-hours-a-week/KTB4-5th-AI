@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import re
+import time
 from pathlib import PurePosixPath
 from urllib.parse import quote, urljoin
 
@@ -26,11 +28,12 @@ class RemoteInferenceClient:
         self._settings = settings
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=settings.remote_inference_timeout_seconds)
+        self._discovered_url: str | None = None
+        self._discovered_at = 0.0
+        self._discovery_lock = asyncio.Lock()
 
     # 객체 키를 서명 URL로 바꿔 Worker에 보내고 도메인 추론 묶음으로 변환한다.
     async def infer(self, object_key: str, sha256: str, input_hint: str) -> RemoteInferenceBundle:
-        if not self._settings.remote_inference_url:
-            raise DependencyUnavailable("REMOTE_INFERENCE_URL이 설정되지 않아 GPU Worker를 호출할 수 없습니다.")
         image_url = await self._resolve_image_url(object_key)
         payload = {
             "requestId": f"remote_{sha256[:16]}",
@@ -42,12 +45,7 @@ class RemoteInferenceClient:
         if self._settings.remote_inference_api_key:
             headers["X-Worker-API-Key"] = self._settings.remote_inference_api_key
         try:
-            response = await self._client.post(
-                f"{self._settings.remote_inference_url.rstrip('/')}/internal/v1/infer",
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
+            response = await self._post_inference(payload, headers)
             parsed = RemoteInferenceResponse.model_validate(response.json())
         except httpx.HTTPStatusError as exc:
             error_code, error_message = self._worker_error(exc.response)
@@ -116,15 +114,104 @@ class RemoteInferenceClient:
 
     # Worker의 readiness endpoint가 성공하는지 확인한다.
     async def ready(self) -> bool:
-        if not self._settings.remote_inference_url:
-            return False
         try:
+            worker_url = await self._worker_url()
             response = await self._client.get(
-                f"{self._settings.remote_inference_url.rstrip('/')}/health/ready"
+                f"{worker_url}/health/ready"
             )
             return response.status_code == 200 and bool(response.json().get("ready"))
-        except (httpx.HTTPError, ValueError):
+        except (DependencyUnavailable, httpx.HTTPError, ValueError):
             return False
+
+    async def _post_inference(self, payload: dict, headers: dict) -> httpx.Response:
+        worker_url = await self._worker_url()
+        try:
+            response = await self._client.post(
+                f"{worker_url}/internal/v1/infer",
+                json=payload,
+                headers=headers,
+            )
+        except httpx.RequestError:
+            if self._settings.remote_inference_url:
+                raise
+            self._invalidate_discovery()
+            worker_url = await self._worker_url(force=True)
+            response = await self._client.post(
+                f"{worker_url}/internal/v1/infer",
+                json=payload,
+                headers=headers,
+            )
+        if self._settings.remote_inference_url or response.status_code < 500:
+            response.raise_for_status()
+            return response
+
+        self._invalidate_discovery()
+        worker_url = await self._worker_url(force=True)
+        response = await self._client.post(
+            f"{worker_url}/internal/v1/infer",
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response
+
+    async def _worker_url(self, *, force: bool = False) -> str:
+        if self._settings.remote_inference_url:
+            return self._settings.remote_inference_url.rstrip("/")
+        if not self._settings.runpod_api_key or not self._settings.runpod_pod_name_prefix:
+            raise DependencyUnavailable("GPU Worker 주소 또는 Runpod 자동 탐색 설정이 필요합니다.")
+
+        now = time.monotonic()
+        if not force and self._discovered_url and now - self._discovered_at < self._settings.runpod_discovery_ttl_seconds:
+            return self._discovered_url
+
+        async with self._discovery_lock:
+            now = time.monotonic()
+            if not force and self._discovered_url and now - self._discovered_at < self._settings.runpod_discovery_ttl_seconds:
+                return self._discovered_url
+            return await self._discover_worker()
+
+    async def _discover_worker(self) -> str:
+        headers = {"Authorization": f"Bearer {self._settings.runpod_api_key}"}
+        response = await self._client.get("https://api.runpod.io/v2/pods", params={"limit": 1000}, headers=headers)
+        response.raise_for_status()
+        pods = response.json().get("pods", [])
+        pattern = re.compile(rf"^{re.escape(self._settings.runpod_pod_name_prefix)}-v(\d+)$")
+        candidates: list[tuple[int, str, str]] = []
+        for pod in pods:
+            match = pattern.fullmatch(str(pod.get("name", "")))
+            if not match or pod.get("status") != "RUNNING":
+                continue
+            if self._settings.runpod_template_id and pod.get("template") != self._settings.runpod_template_id:
+                continue
+            pod_id = str(pod.get("id", ""))
+            if pod_id:
+                candidates.append((int(match.group(1)), str(pod.get("startedAt") or ""), pod_id))
+
+        candidates.sort(reverse=True)
+        versions: dict[int, int] = {}
+        for version, _, _ in candidates:
+            versions[version] = versions.get(version, 0) + 1
+        duplicate_versions = [version for version, count in versions.items() if count > 1]
+        if duplicate_versions:
+            joined = ", ".join(f"v{version}" for version in sorted(duplicate_versions, reverse=True))
+            raise DependencyUnavailable(f"같은 버전의 Runpod Worker가 여러 개 실행 중입니다: {joined}")
+        for version, _, pod_id in candidates:
+            worker_url = f"https://{pod_id}-{self._settings.runpod_worker_port}.proxy.runpod.net"
+            try:
+                ready = await self._client.get(f"{worker_url}/health/ready")
+                if ready.status_code == 200 and bool(ready.json().get("ready")):
+                    self._discovered_url = worker_url
+                    self._discovered_at = time.monotonic()
+                    logger.info("remote_inference.discovered pod_id=%s version=%s", pod_id, version)
+                    return worker_url
+            except (httpx.HTTPError, ValueError):
+                continue
+        raise DependencyUnavailable("실행 중이며 준비가 완료된 Runpod GPU Worker를 찾지 못했습니다.")
+
+    def _invalidate_discovery(self) -> None:
+        self._discovered_url = None
+        self._discovered_at = 0.0
 
     # 이 어댑터가 생성한 HTTP 클라이언트만 종료한다.
     async def close(self) -> None:
