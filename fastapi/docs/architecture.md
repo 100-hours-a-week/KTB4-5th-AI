@@ -130,12 +130,19 @@ sequenceDiagram
 사용자가 **수정(`CORRECTED`)한 항목의 상품명·카테고리**뿐이다. 새로 추가하거나 삭제한 상품은 AI 결과가
 아니라 사용자 판단이라 학습하지 않는다.
 
-학습 키는 원본 항목의 OCR 원문을 카탈로그 조회와 같은 규칙으로 정규화한 값이다. 같은 키를 서로 다른
-냉장고 `FEEDBACK_PROMOTION_MIN_SUPPORT`(기본 3)곳 이상이 같은 이름·카테고리로 고쳤고, 의견을 낸 냉장고
-중 그 값의 비율이 `FEEDBACK_PROMOTION_MIN_AGREEMENT`(기본 0.8) 이상이면 `learned_corrections`로 승격한다.
-상품 카탈로그 조회는 이 학습 지식을 별칭·표준명보다 먼저 보며, 영수증에서 학습 지식으로 고른 상품은 OCR
+학습 키는 원본 항목의 OCR 원문을 카탈로그 조회와 같은 규칙으로 정규화한 값이다. 한 번 수정한 값은
+`PERSONAL` 지식으로 해당 냉장고에 즉시 적용한다. 같은 키를 서로 다른 냉장고
+`FEEDBACK_PROMOTION_MIN_SUPPORT`(기본 3)곳 이상이 같은 이름·카테고리로 고쳤고, 의견을 낸 냉장고
+중 그 값의 비율이 `FEEDBACK_PROMOTION_MIN_AGREEMENT`(기본 0.8) 이상이면 `GLOBAL` 지식으로 승격한다.
+분석 요청에 `refrigeratorId`가 있으면 개인 → 전역 → 별칭 → 표준명 순서로 조회하고, 없으면 개인 지식을
+건너뛴다. 영수증에서 학습 지식으로 고른 상품은 OCR
 원문 대신 고친 이름을 표시한다. 기존 카탈로그·별칭은 바꾸지 않으므로 잘못 승격된 지식은 `is_active`만 끄면
 된다. 학습은 EC2 PostgreSQL에 쌓이므로 RunPod Worker 교체·마이그레이션과 무관하다.
+
+피드백 응답의 `trainingEligibility=PERSONAL_APPLIED`는 해당 냉장고의 보정 지식에 즉시 반영됐다는
+뜻이고, `APPLIED`는 전역 보정으로도 승격됐다는 뜻이다. 상품명·카테고리만 재사용하며 수량·중량·
+소비기한 수정값은 다음 구매에 그대로 적용하지 않는다. Gemma 가중치를 갱신하는 과정은 포함하지 않는다.
+`019_personal_feedback_learning.sql`을 앱 배포 전에 적용한다.
 
 ## 동시성과 메모리 관리
 
@@ -240,7 +247,7 @@ app/
 
 | Method | Endpoint | 역할 |
 | --- | --- | --- |
-| `POST` | `/ai/v1/analyses` | 영수증·실물 분석 접수, `202 Accepted` |
+| `POST` | `/ai/v1/analyses` | 영수증·실물 분석 접수, `202 Accepted`. 개인 보정 조회에는 `refrigeratorId` 전달 필요 |
 | `GET` | `/ai/v1/analyses/{analysisId}` | 작업 상태와 결과 확인. 메모리에 없으면 PostgreSQL 이력에서 조회 |
 | `POST` | `/ai/v1/analyses/{analysisId}/feedback` | 사용자 확정값 기록. 동의한 수정의 상품명·카테고리만 학습 후보([피드백 학습](#피드백-학습)) |
 | `GET` | `/ai/v1/models/status` | GPU Worker 준비 상태(`remoteInference`), 큐 크기·용량, 동시 처리 수(`activeCount`) |

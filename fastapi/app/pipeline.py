@@ -1,6 +1,7 @@
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
 from time import perf_counter
@@ -122,6 +123,8 @@ class ReceiptAnalysisPipeline:
         self._remote_inference_provider = remote_inference_provider
         self._shelf_life_lookup = shelf_life_lookup
         self._product_catalog_lookup = product_catalog_lookup
+        # 파이프라인 객체는 여러 consumer가 공유하므로 요청별 냉장고 ID를 ContextVar로 격리한다.
+        self._refrigerator_id: ContextVar[int | None] = ContextVar("pipeline_refrigerator_id", default=None)
 
     # 원격 GPU Worker의 준비 상태를 이름별 boolean으로 반환한다.
     async def readiness(self) -> dict[str, bool]:
@@ -141,6 +144,7 @@ class ReceiptAnalysisPipeline:
     # 분석 레코드와 단계 콜백을 받아 OCR·분류·검증을 수행한 결과를 반환한다.
     async def run(self, record: AnalysisRecord, set_stage: Callable[[InternalStage], Awaitable[None]]) -> AnalysisResult:
         request = record.request
+        self._refrigerator_id.set(request.refrigerator_id)
         started_at = perf_counter()
         log_context = "analysis_id=%s request_id=%s"
         logger.info("pipeline.started " + log_context, record.analysis_id, request.request_id)
@@ -749,7 +753,10 @@ class ReceiptAnalysisPipeline:
     # 조회가 실패해도 전체 분석을 실패시키지 않고 Gemma로 넘기도록 None을 반환한다.
     async def _lookup_catalog_category(self, line_text: str) -> ProductCatalogMatch | None:
         try:
-            return await self._product_catalog_lookup.find(normalize_product_name(correct_common_ocr_errors(line_text)))
+            return await self._product_catalog_lookup.find(
+                normalize_product_name(correct_common_ocr_errors(line_text)),
+                self._refrigerator_id.get(),
+            )
         except Exception:
             logger.exception("product_catalog_lookup.failed line_text=%s", line_text)
             return None

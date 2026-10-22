@@ -39,9 +39,9 @@
 | `016_rename_categories_to_backend_codes.sql` | (제약·UPDATE) | 카테고리 코드를 백엔드 명세와 통일: `GRAIN_NOODLE→GRAINS_NOODLE`, `PROCESSED→PROCESSED_FOOD`, `ETC→OTHER`. 앱 배포 전에 적용 | 스키마·데이터 변경 |
 | `017_shelf_life_rules_leafy_greens_broccoli.sql` | (INSERT만) | 깻잎·브로콜리 냉장 보관 참고 범위(USDA ARS Handbook 66) | 시드 데이터 |
 | `018_feedback_learning.sql` | `receipt_item_feedback`, `learned_corrections` | 사용자 피드백과 피드백에서 승격한 학습 지식. 상품 카탈로그 조회 쿼리가 `learned_corrections`를 읽으므로 **앱 배포 전에 적용** | 스키마 변경 |
+| `019_personal_feedback_learning.sql` | `learned_corrections` 컬럼·인덱스 변경 | 한 번 수정한 값은 해당 냉장고에 즉시 적용하고, 여러 냉장고 합의값은 전역 보정으로 유지 | 스키마 변경 |
 
 아래 본문의 실험 기록에 나오는 `PROCESSED` 등 이전 카테고리 코드는 016 적용 전 기록이다.
-| `015_product_vision_catalog_seed.sql` | (INSERT만) | 실물 상품 실험에서 확인한 상품명과 OCR 별칭 8건 보강 | 시드 데이터 |
 
 ```mermaid
 erDiagram
@@ -55,18 +55,18 @@ erDiagram
 - 이미지 바이너리: 객체 저장소에 두고 검증된 `object_key`와 SHA-256만 저장한다.
 - 사용자 냉장고·재고: 백엔드 MySQL이 관리한다.
 - 영수증 수량의 상품 기본값: 수량은 현재 영수증에서 매번 읽는다.
-- 사용자·관리자 교정 피드백: 동의·보관 정책 승인 전까지는 테이블 자체를 만들지 않는다.
 - 단계별 지연시간·토큰 관측: Phoenix/OpenTelemetry와 역할이 겹치므로 어느 쪽을 쓸지 정하기
   전까지는 테이블을 만들지 않는다.
 - 작업 큐: 큐는 FastAPI 프로세스 메모리에 있고 DB 상태 행을 작업 선점 용도로 사용하지 않는다.
 
 ## 조회 순서
 
-1. 바코드가 있으면 `product_knowledge.barcode`를 정확히 조회한다.
-2. 정규화한 OCR 문자열로 `product_aliases.normalized_alias`를 정확히 조회한다.
-3. 정확한 값이 없으면 `pg_trgm` 유사도 조회로 후보만 만든다.
-4. 후보가 확정 기준을 넘지 못하면 해당 행만 Gemma에 전달한다.
-5. 영수증에서 소비기한이 확인되지 않은 경우에만 검수된 `shelf_life_rules`를 조회한다.
+1. 분석 요청에 `refrigeratorId`가 있으면 해당 냉장고의 개인 보정을 조회한다.
+2. 개인 보정이 없으면 여러 냉장고 합의로 승인된 전역 보정을 조회한다.
+3. 정규화한 OCR 문자열로 `product_aliases.normalized_alias`와 `product_knowledge.normalized_name`을 정확히 조회한다.
+4. 정확한 값이 없으면 `pg_trgm` 유사도 조회로 후보만 만든다.
+5. 후보가 확정 기준을 넘지 못하면 해당 행만 Gemma에 전달한다.
+6. 영수증에서 소비기한이 확인되지 않은 경우에만 검수된 `shelf_life_rules`를 조회한다.
 
 유사도 검색 결과는 자동 확정값이 아니라 모델 입력 후보이다. 임계값은 평가 데이터로 정한 뒤
 애플리케이션 설정에 둔다.

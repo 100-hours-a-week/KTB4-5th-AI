@@ -18,17 +18,22 @@ _LEARNED_LOOKUP_PART = """
     SELECT correction_id AS product_id, corrected_name AS canonical_name, category,
            NULL::VARCHAR AS suggested_storage_type, 0 AS priority
     FROM receipt_ai.learned_corrections
-    WHERE learning_key = $1 AND is_active
+    WHERE learning_key = $1 AND scope = 'PERSONAL' AND refrigerator_id = $2 AND is_active
+    UNION ALL
+    SELECT correction_id AS product_id, corrected_name AS canonical_name, category,
+           NULL::VARCHAR AS suggested_storage_type, 1 AS priority
+    FROM receipt_ai.learned_corrections
+    WHERE learning_key = $1 AND scope = 'GLOBAL' AND is_active
     UNION ALL
 """
 
 _CATALOG_LOOKUP_QUERY = """
-    SELECT pk.product_id, pk.canonical_name, pk.category, pk.suggested_storage_type, 1 AS priority
+    SELECT pk.product_id, pk.canonical_name, pk.category, pk.suggested_storage_type, 2 AS priority
     FROM receipt_ai.product_aliases pa
     JOIN receipt_ai.product_knowledge pk ON pk.product_id = pa.product_id
     WHERE pa.normalized_alias = $1 AND pa.is_active AND pk.is_active
     UNION ALL
-    SELECT product_id, canonical_name, category, suggested_storage_type, 2 AS priority
+    SELECT product_id, canonical_name, category, suggested_storage_type, 3 AS priority
     FROM receipt_ai.product_knowledge
     WHERE normalized_name = $1 AND is_active
     ORDER BY priority
@@ -94,24 +99,25 @@ class PostgresProductCatalogLookup:
 
     # 정규화 상품명으로 별칭·표준명이 정확히 일치하는 카탈로그 항목을 조회해 반환한다.
     # 결과(없음 포함)는 프로세스 메모리에 캐싱해 동일 문자열 재조회 시 DB를 다시 안 부른다.
-    async def find(self, normalized_text: str) -> ProductCatalogMatch | None:
-        return await self._cache.get_or_load(normalized_text, lambda: self._query(normalized_text))
+    async def find(self, normalized_text: str, refrigerator_id: int | None = None) -> ProductCatalogMatch | None:
+        cache_key = f"{refrigerator_id or 'global'}:{normalized_text}"
+        return await self._cache.get_or_load(cache_key, lambda: self._query(normalized_text, refrigerator_id))
 
     # 피드백 학습으로 지식이 바뀐 조회 키의 캐시를 비운다.
-    def forget(self, normalized_text: str) -> None:
-        self._cache.forget(normalized_text)
+    def forget(self, normalized_text: str, refrigerator_id: int | None = None) -> None:
+        self._cache.forget(f"{refrigerator_id or 'global'}:{normalized_text}")
 
-    async def _query(self, normalized_text: str) -> ProductCatalogMatch | None:
+    async def _query(self, normalized_text: str, refrigerator_id: int | None) -> ProductCatalogMatch | None:
         try:
             pool = await self._pool.get()
-            row = await self._fetch_exact(pool, normalized_text)
+            row = await self._fetch_exact(pool, normalized_text, refrigerator_id)
             if row is None:
                 if len(normalized_text.replace(" ", "")) < _FUZZY_MIN_QUERY_LENGTH:
                     return None
                 row = await pool.fetchrow(_FUZZY_LOOKUP_QUERY, normalized_text)
                 matched_via = "fuzzy"
             else:
-                matched_via = "learned" if row.get("priority") == 0 else "exact"
+                matched_via = "learned" if row.get("priority") in {0, 1} else "exact"
         except DependencyUnavailable:
             raise
         except Exception as exc:
@@ -132,10 +138,10 @@ class PostgresProductCatalogLookup:
         )
 
     # 학습 지식·별칭·표준명 정확 일치를 조회한다. 학습 지식 테이블이 없으면 기존 쿼리로 대체한다.
-    async def _fetch_exact(self, pool: Any, normalized_text: str) -> Any:
+    async def _fetch_exact(self, pool: Any, normalized_text: str, refrigerator_id: int | None) -> Any:
         if time.monotonic() >= self._learned_table_missing_until:
             try:
-                return await pool.fetchrow(_LOOKUP_QUERY, normalized_text)
+                return await pool.fetchrow(_LOOKUP_QUERY, normalized_text, refrigerator_id)
             except Exception as exc:
                 if type(exc).__name__ != "UndefinedTableError":
                     raise

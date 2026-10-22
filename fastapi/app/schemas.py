@@ -104,6 +104,7 @@ class ImageReference(BaseModel):
 
 class AnalysisCreateRequest(BaseModel):
     request_id: NonBlank = Field(alias="requestId", max_length=100)
+    refrigerator_id: int | None = Field(default=None, alias="refrigeratorId", gt=0)
     image: ImageReference
     input_hint: InputHint = Field(default=InputHint.AUTO, alias="inputHint")
     locale: Literal["ko-KR"] = "ko-KR"
@@ -406,6 +407,7 @@ class FeedbackAction(StrEnum):
 
 class TrainingEligibility(StrEnum):
     NOT_ELIGIBLE = "NOT_ELIGIBLE"  # 학습하지 않음(수정 아님, 동의 없음, 학습 대상 필드 변경 없음)
+    PERSONAL_APPLIED = "PERSONAL_APPLIED"  # 해당 냉장고에는 즉시 적용, 전역 승격 의견으로도 집계
     PENDING_REVIEW = "PENDING_REVIEW"  # 학습 후보. 다른 사용자의 같은 수정이 쌓이기를 기다림
     APPLIED = "APPLIED"  # 승격 기준을 넘어 학습 지식에 반영됨
     REJECTED = "REJECTED"  # 검수자가 학습에서 제외함

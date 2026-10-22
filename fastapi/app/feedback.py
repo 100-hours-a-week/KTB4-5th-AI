@@ -92,7 +92,7 @@ class FeedbackRepository(Protocol):
 
 class LearnedKnowledgeCache(Protocol):
     # 학습 지식이 바뀐 조회 키의 캐시를 비운다.
-    def forget(self, normalized_text: str) -> None: ...
+    def forget(self, normalized_text: str, refrigerator_id: int | None = None) -> None: ...
 
 
 # 분석 원본 항목과 사용자 피드백을 비교해 저장할 항목과 학습 후보 여부를 반환한다.
@@ -134,7 +134,7 @@ def evaluate_feedback_item(item: FeedbackItem, original: ReceiptItem | None, con
         entry.target_name = confirmed.name
         entry.target_normalized_name = target_normalized
         entry.target_category = confirmed.category.value
-        entry.training_eligibility = TrainingEligibility.PENDING_REVIEW
+        entry.training_eligibility = TrainingEligibility.PERSONAL_APPLIED
     return entry
 
 
@@ -229,6 +229,9 @@ class FeedbackService:
             self._settings.feedback_promotion_min_agreement,
         )
         if self._knowledge_cache is not None:
+            personal_keys = {entry.learning_key for entry in entries if entry.learning_key}
+            for key in personal_keys:
+                self._knowledge_cache.forget(key, request.refrigerator_id)
             for key in promoted_keys:
                 self._knowledge_cache.forget(key)
         logger.info(

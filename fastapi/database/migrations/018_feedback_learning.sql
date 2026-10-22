@@ -103,6 +103,22 @@ CREATE TRIGGER trg_learned_corrections_updated_at
 BEFORE UPDATE ON receipt_ai.learned_corrections
 FOR EACH ROW EXECUTE FUNCTION receipt_ai.set_updated_at();
 
+-- 운영 애플리케이션 계정은 기존 테이블 권한을 자동 상속하지 않는다. 표준 계정이 존재하는
+-- 환경에서는 피드백 저장·조회와 학습 지식 승격에 필요한 최소 권한을 함께 부여한다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'receipt_ai') THEN
+        GRANT SELECT, INSERT, UPDATE
+            ON receipt_ai.receipt_item_feedback, receipt_ai.learned_corrections
+            TO receipt_ai;
+        GRANT USAGE, SELECT
+            ON SEQUENCE receipt_ai.receipt_item_feedback_feedback_pk_seq,
+                        receipt_ai.learned_corrections_correction_id_seq
+            TO receipt_ai;
+    END IF;
+END;
+$$;
+
 -- 002 주석은 피드백 테이블이 생기면 보관기간 정리에서 피드백이 달린 분석을 보호하라고 했다. 피드백 행이
 -- 원본 항목을 original_item에 복사해 두므로 분석 이력이 삭제돼도 학습 근거가 남는다. 그래서
 -- receipt_ai.purge_expired_analyses()는 바꾸지 않고, 분석 이력은 기존 보관기간(90일)대로 삭제한다.

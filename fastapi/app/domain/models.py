@@ -113,6 +113,6 @@ class ShelfLifeLookup(Protocol):
 
 
 class ProductCatalogLookup(Protocol):
-    # 정규화 상품명을 받아 별칭·표준명이 정확히 일치하는 카탈로그 항목 또는 None을 반환한다.
-    async def find(self, normalized_text: str) -> ProductCatalogMatch | None:
+    # 정규화 상품명과 선택적 냉장고 ID를 받아 개인·전역 보정 또는 카탈로그 항목을 반환한다.
+    async def find(self, normalized_text: str, refrigerator_id: int | None = None) -> ProductCatalogMatch | None:
         ...

@@ -64,14 +64,35 @@ _INSERT_FEEDBACK = """
 _LEARNING_VOTES = """
     SELECT refrigerator_id, target_name, target_normalized_name, target_category
     FROM receipt_ai.receipt_item_feedback
-    WHERE learning_key = $1 AND training_eligibility IN ('PENDING_REVIEW', 'APPLIED')
+    WHERE learning_key = $1 AND training_eligibility IN ('PERSONAL_APPLIED', 'PENDING_REVIEW', 'APPLIED')
     ORDER BY created_at, feedback_pk
 """
 
 _ACTIVE_CORRECTION = """
     SELECT correction_id, normalized_name, category
     FROM receipt_ai.learned_corrections
-    WHERE learning_key = $1 AND is_active
+    WHERE learning_key = $1 AND scope = 'GLOBAL' AND is_active
+"""
+
+_ACTIVE_PERSONAL_CORRECTION = """
+    SELECT correction_id
+    FROM receipt_ai.learned_corrections
+    WHERE learning_key = $1 AND scope = 'PERSONAL' AND refrigerator_id = $2 AND is_active
+"""
+
+_UPDATE_PERSONAL_CORRECTION = """
+    UPDATE receipt_ai.learned_corrections
+    SET corrected_name = $2, normalized_name = $3, category = $4,
+        support_count = 1, agreement_ratio = 1, review_status = 'APPROVED'
+    WHERE correction_id = $1
+"""
+
+_INSERT_PERSONAL_CORRECTION = """
+    INSERT INTO receipt_ai.learned_corrections (
+        learning_key, corrected_name, normalized_name, category, support_count, agreement_ratio,
+        scope, refrigerator_id, review_status
+    )
+    VALUES ($1, $2, $3, $4, 1, 1, 'PERSONAL', $5, 'APPROVED')
 """
 
 _UPDATE_CORRECTION_SUPPORT = """
@@ -88,9 +109,10 @@ _DEACTIVATE_CORRECTION = """
 
 _INSERT_CORRECTION = """
     INSERT INTO receipt_ai.learned_corrections (
-        learning_key, corrected_name, normalized_name, category, support_count, agreement_ratio
+        learning_key, corrected_name, normalized_name, category, support_count, agreement_ratio,
+        scope, refrigerator_id, review_status
     )
-    VALUES ($1, $2, $3, $4, $5, $6)
+    VALUES ($1, $2, $3, $4, $5, $6, 'GLOBAL', NULL, 'APPROVED')
 """
 
 # 승격된 값과 같은 수정은 APPLIED로, 다른 값으로 고쳤던 기존 APPLIED 수정은 다시 후보로 되돌린다.
@@ -98,9 +120,9 @@ _MARK_APPLIED = """
     UPDATE receipt_ai.receipt_item_feedback
     SET training_eligibility = CASE
         WHEN target_normalized_name = $2 AND target_category = $3 THEN 'APPLIED'
-        ELSE 'PENDING_REVIEW'
+        ELSE 'PERSONAL_APPLIED'
     END
-    WHERE learning_key = $1 AND training_eligibility IN ('PENDING_REVIEW', 'APPLIED')
+    WHERE learning_key = $1 AND training_eligibility IN ('PERSONAL_APPLIED', 'PENDING_REVIEW', 'APPLIED')
 """
 
 
@@ -210,9 +232,15 @@ class PostgresFeedbackRepository:
                     {
                         entry.learning_key
                         for entry in entries
-                        if entry.learning_key and entry.training_eligibility == TrainingEligibility.PENDING_REVIEW
+                        if entry.learning_key and entry.training_eligibility == TrainingEligibility.PERSONAL_APPLIED
                     }
                 )
+                # 서로 다른 분석이 같은 키를 동시에 수정해도 개인 지식 삽입과 전역 집계를 직렬화한다.
+                for key in learning_keys:
+                    await connection.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
+                for entry in entries:
+                    if entry.learning_key and entry.training_eligibility == TrainingEligibility.PERSONAL_APPLIED:
+                        await self._upsert_personal(connection, request.refrigerator_id, entry)
                 for key in learning_keys:
                     if await self._promote(connection, key, min_support, min_agreement):
                         promoted.append(key)
@@ -224,6 +252,27 @@ class PostgresFeedbackRepository:
                 raise
             return existing, []
         return self._recorded(analysis_id, rows), promoted
+
+    # 사용자 수정 한 건을 해당 냉장고 전용 보정 지식으로 즉시 저장하거나 최신 값으로 교체한다.
+    async def _upsert_personal(self, connection: Any, refrigerator_id: int, entry: FeedbackEntry) -> None:
+        current = await connection.fetchrow(_ACTIVE_PERSONAL_CORRECTION, entry.learning_key, refrigerator_id)
+        if current is None:
+            await connection.execute(
+                _INSERT_PERSONAL_CORRECTION,
+                entry.learning_key,
+                entry.target_name,
+                entry.target_normalized_name,
+                entry.target_category,
+                refrigerator_id,
+            )
+            return
+        await connection.execute(
+            _UPDATE_PERSONAL_CORRECTION,
+            current["correction_id"],
+            entry.target_name,
+            entry.target_normalized_name,
+            entry.target_category,
+        )
 
     # 학습 키 하나의 수정 의견을 모아 승격 기준을 넘으면 learned_corrections를 갱신하고 변경 여부를 반환한다.
     async def _promote(self, connection: Any, key: str, min_support: int, min_agreement: float) -> bool:

@@ -101,6 +101,7 @@ curl -X POST http://127.0.0.1:8000/ai/v1/analyses \
   -H 'X-Internal-API-Key: change-me' \
   -d '{
     "requestId": "req_receipt_001",
+    "refrigeratorId": 101,
     "image": {
       "objectKey": "receipt.png",
       "sha256": "64자리_SHA256"
@@ -110,6 +111,9 @@ curl -X POST http://127.0.0.1:8000/ai/v1/analyses \
     "timezone": "Asia/Seoul"
   }'
 ```
+
+`refrigeratorId`는 생략할 수 있지만, 없으면 개인 보정 지식을 조회할 수 없다. 사용자가 이전에
+고친 상품명·카테고리를 같은 냉장고의 다음 분석부터 즉시 적용하려면 백엔드가 반드시 전달한다.
 
 응답의 `analysisId`는 콜백이 없는 로컬 환경에서만 GET으로 확인한다.
 
