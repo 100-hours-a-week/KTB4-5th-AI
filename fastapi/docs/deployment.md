@@ -86,6 +86,12 @@ GitHub 저장소에는 `RUNPOD_API_KEY` Secret과 선택적인 `RUNPOD_POD_NAME_
 Variable만 설정하며 고정 Pod ID는 저장하지 않는다. Worker에는 PostgreSQL 접속 정보를 넣지 않는다. 카탈로그·소비기한 규칙 조회와 최종 응답
 정책은 EC2 API 책임이다.
 
+Pod는 한국 시간 08:30~18:00에만 실행한다. GitHub schedule은 몇 시간씩 늦거나 빠지는 일이 잦아 쓰지 않고,
+EC2 한 대의 root crontab이 [`ops/runpod-schedule-dispatch.sh`](../ops/runpod-schedule-dispatch.sh)로
+`runpod-schedule.yml`을 `workflow_dispatch(action=start|stop)`로 호출한다. 08:30 시작, 18:00 정지이고 그 사이에도
+30분마다 같은 작업을 다시 보내 낮에 꺼진 Pod는 켜고 밤에 켜진 Pod는 끈다. 설치 방법은 스크립트 상단 주석에 있다.
+낮에 점검하려고 Pod를 오래 꺼 두려면 crontab의 start 줄을 잠시 주석 처리한다.
+
 ## 로컬 이미지로 요청하기
 
 `IMAGE_SOURCE=local`이면 Worker가 `REMOTE_IMAGE_BASE_URL` 아래에서 이미지를 내려받는다. 그 주소로

@@ -1,17 +1,8 @@
-name: RunPod 예약 시작 및 정지
+name: RunPod 시작 및 정지
 
+# GitHub schedule은 몇 시간씩 늦거나 빠져서 쓰지 않는다. 시각은 EC2 crontab이 정하고
+# (fastapi/ops/runpod-schedule-dispatch.sh), 이 워크플로는 받은 작업만 실행한다. 수동 실행도 같다.
 on:
-  schedule:
-    # 시작 창 한국 시간 08:33~08:58(UTC 23시), 정지 창 18:03~18:28(UTC 9시)에 5분마다 실행한다.
-    # 몰리는 정각·30분은 피했다. 한 창 안에서 한 회가 빠져도 다음 회가 같은 작업을 다시 시도한다.
-    - cron: "33-58/5 23 * * *"
-    - cron: "3-28/5 9 * * *"
-    # 창 밖에서도 30분마다 상태를 맞춘다. 낮에 꺼져 있으면 다시 켜고, 밤에 켜져 있으면 끈다.
-    # 창의 예약이 모두 빠지거나 낮에 Pod가 멈춰도 다음 회가 바로잡는다.
-    - cron: "13,43 * * * *"
-    # GitHub Actions cron은 몇 시간씩 늦게 도착할 수 있으므로 어떤 cron이 실행됐는지가 아니라 실행 시점의
-    # 한국 시간으로 작업(08:30~17:59 start, 그 밖에는 stop)을 정한다. 아침 트리거가 18시 넘어 도착해도
-    # Pod를 다시 켜지 않는다.
   workflow_dispatch:
     inputs:
       action:
@@ -36,8 +27,9 @@ jobs:
   control:
     name: Pod 제어
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 30
     env:
+      ACTION: ${{ inputs.action }}
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       RUNPOD_POD_NAME_PREFIX: ${{ vars.RUNPOD_POD_NAME_PREFIX || 'dameokja-ai-worker' }}
       RUNPOD_TEMPLATE_ID: ${{ vars.RUNPOD_TEMPLATE_ID }}
@@ -47,29 +39,16 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: 작업 결정
-        id: operation
-        env:
-          MANUAL_ACTION: ${{ inputs.action }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            action="${MANUAL_ACTION}"
-          else
-            action="$(bash .github/scripts/runpod_desired_action.sh)"
-          fi
-          echo "현재 한국 시간 $(TZ=Asia/Seoul date '+%F %H:%M'), 작업: ${action}"
-          echo "action=${action}" >> "$GITHUB_OUTPUT"
       - name: RunPod 제어
-        env:
-          ACTION: ${{ steps.operation.outputs.action }}
         run: |
+          echo "현재 한국 시간 $(TZ=Asia/Seoul date '+%F %H:%M'), 작업: ${ACTION}"
           if [[ "${ACTION}" == "status" ]]; then
             python3 .github/scripts/control_runpod.py
             exit 0
           fi
 
-          # 예약 실행은 같은 창의 다음 회차가 다시 시도하므로 20분까지만 재시도하고 실패로 남긴다.
-          # 수동 실행은 성공할 때까지 재시도한다(job timeout까지).
+          # crontab이 30분마다 같은 작업을 다시 보내므로 20분까지만 재시도하고 실패로 남긴다. 끝없이 재시도하면
+          # 같은 concurrency 그룹의 다음 작업(예: 18:00 정지)이 그 뒤에서 계속 기다리게 된다.
           deadline=$((SECONDS + 1200))
           group=1
           while true; do
@@ -82,15 +61,9 @@ jobs:
                 sleep 30
               fi
             done
-            if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-              if [[ "$(bash .github/scripts/runpod_desired_action.sh)" != "${ACTION}" ]]; then
-                echo "재시도 중 목표 상태가 바뀌었습니다. 다음 예약 실행에 맡깁니다."
-                exit 0
-              fi
-              if [[ "${SECONDS}" -ge "${deadline}" ]]; then
-                echo "::error::${ACTION} 재시도 시간을 넘겼습니다. 다음 예약 실행에서 다시 시도합니다."
-                exit 1
-              fi
+            if [[ "${SECONDS}" -ge "${deadline}" ]]; then
+              echo "::error::${ACTION} 재시도 시간을 넘겼습니다. 다음 crontab 호출에서 다시 시도합니다."
+              exit 1
             fi
             echo "${ACTION} 3회 실패. 5분 뒤 다시 시도합니다."
             group=$((group + 1))
