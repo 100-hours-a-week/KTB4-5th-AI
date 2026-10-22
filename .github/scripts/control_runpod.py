@@ -87,6 +87,23 @@ def pod_action(pod_id: str, action: str):
     return request("POST", f"/v2/pods/{pod_id}/action", {"action": action})
 
 
+def cleanup_older_exited_pods(current_version: int, current_id: str) -> None:
+    """준비된 최신 Pod보다 오래된 정지 Pod를 가능한 시점에 정리한다."""
+    for version, pod in list_managed_pods():
+        pod_id = str(pod["id"])
+        if pod_id == current_id or version >= current_version:
+            continue
+        if str(pod.get("status", "")).upper() != "EXITED":
+            continue
+        try:
+            pod_action(pod_id, "terminate")
+            print(f"이전 Pod 정리 완료: {pod_id} (v{version})")
+        except ApiError as exc:
+            # RunPod 내부 마이그레이션이 끝나기 전에는 원본 Pod 삭제를 거부한다.
+            # 다음 5분 예약 실행에서 다시 정리하므로 시작 자체는 성공으로 처리한다.
+            print(f"이전 Pod 정리 보류: {pod_id}: {exc}", file=sys.stderr)
+
+
 def wait_status(pod_id: str, wanted: set[str], timeout: int = START_TIMEOUT) -> dict:
     deadline = time.monotonic() + timeout
     last_status = "UNKNOWN"
@@ -149,9 +166,18 @@ def migrate(source_id: str, next_version: int) -> dict:
         raise RuntimeError("RunPod가 마이그레이션 ID를 반환하지 않았습니다")
 
     deadline = time.monotonic() + START_TIMEOUT
+    last_report = None
     while time.monotonic() < deadline:
         info = graphql(status_query, {"migrationId": migration_id}).get("podMigrationById") or {}
         status = str(info.get("status", "UNKNOWN")).upper()
+        report = (status, info.get("message"), info.get("targetPodId"))
+        if report != last_report:
+            print(
+                "마이그레이션 상태: "
+                f"{status}, target={info.get('targetPodId') or '-'}, "
+                f"message={info.get('message') or '-'}"
+            )
+            last_report = report
         if status == "COMPLETED":
             target_id = str(info.get("targetPodId") or "")
             if not target_id:
@@ -177,6 +203,7 @@ def start() -> None:
     pod_id = str(pod["id"])
     if pod.get("status") == "RUNNING":
         wait_ready(pod_id)
+        cleanup_older_exited_pods(version, pod_id)
         print(f"이미 실행 중입니다: {pod_id}")
         return
     try:
@@ -199,6 +226,7 @@ def start() -> None:
     # 컨테이너나 모델 준비 실패는 GPU 자리 부족을 뜻하지 않는다. 이미 실행된 Pod를
     # 마이그레이션하지 않고 외부 재시도 루프가 같은 Pod의 readiness를 다시 확인하게 한다.
     wait_ready(pod_id)
+    cleanup_older_exited_pods(version, pod_id)
     print(f"시작 완료: {pod_id}")
 
 
