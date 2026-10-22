@@ -51,9 +51,17 @@ class Settings(BaseSettings):
     database_url: str | None = None
     database_pool_max_size: int = Field(default=5, ge=1, le=50)
     reference_cache_max_size: int = Field(default=2000, ge=1, le=100_000)
+    # 여러 FastAPI 프로세스 중 한 곳에서 학습 지식이 승격돼도 다른 프로세스가 이 시간 안에
+    # PostgreSQL을 다시 조회하도록 상품 카탈로그 캐시에 만료 시간을 둔다.
+    product_catalog_cache_ttl_seconds: float = Field(default=60.0, ge=1, le=3600)
     # 낮은 임계값은 주소·생활용품·깨진 OCR 문자열을 이름이 비슷한 식품으로 끌어온다.
     # 0.55부터 시작해 홀드아웃 Precision/Recall을 함께 보며 조정한다.
     catalog_fuzzy_similarity_threshold: float = Field(default=0.55, ge=0.1, le=1.0)
+
+    # 피드백 학습 승격 기준. 같은 OCR 원문을 서로 다른 냉장고 N곳 이상이 같은 값으로 고쳤고,
+    # 의견을 낸 냉장고 중 그 값의 비율이 기준 이상일 때만 학습 지식으로 반영한다.
+    feedback_promotion_min_support: int = Field(default=3, ge=1, le=100)
+    feedback_promotion_min_agreement: float = Field(default=0.8, gt=0.5, le=1.0)
 
     callback_url: str | None = None
     callback_api_key: str | None = None

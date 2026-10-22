@@ -393,3 +393,99 @@ class RemoteInferenceResponse(BaseModel):
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+# 아래 Feedback* 모델은 "AI‐1단계 API 명세" 6절 피드백 API를 따른다. 백엔드는 사용자가 분석 결과를
+# 재고로 확정할 때 분석 한 건의 항목별 처리 결과를 한 번에 보낸다.
+class FeedbackAction(StrEnum):
+    CONFIRMED = "CONFIRMED"  # AI 결과를 그대로 확정
+    CORRECTED = "CORRECTED"  # AI 결과의 일부 값을 고쳐서 확정
+    ADDED = "ADDED"  # AI가 찾지 못한 상품을 사용자가 새로 추가
+    DELETED = "DELETED"  # AI가 찾은 상품을 사용자가 삭제
+
+
+class TrainingEligibility(StrEnum):
+    NOT_ELIGIBLE = "NOT_ELIGIBLE"  # 학습하지 않음(수정 아님, 동의 없음, 학습 대상 필드 변경 없음)
+    PENDING_REVIEW = "PENDING_REVIEW"  # 학습 후보. 다른 사용자의 같은 수정이 쌓이기를 기다림
+    APPLIED = "APPLIED"  # 승격 기준을 넘어 학습 지식에 반영됨
+    REJECTED = "REJECTED"  # 검수자가 학습에서 제외함
+
+
+class FeedbackConfirmedItem(BaseModel):
+    name: NonBlank = Field(max_length=100)
+    category: Category
+    storage_type: Literal["REFRIGERATED", "FROZEN"] = Field(alias="storageType")
+    measure_type: Literal["COUNT", "WEIGHT"] = Field(alias="measureType")
+    quantity: int | None = None
+    weight_value: float | None = Field(default=None, alias="weightValue")
+    weight_unit: Literal["G", "ML", "NONE"] = Field(default="NONE", alias="weightUnit")
+    expiration_date: Date | None = Field(default=None, alias="expirationDate")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    # 백엔드 ingredients ERD의 CHECK 조건과 같은 측정값 조합만 허용하고 자신을 반환한다.
+    def validate_erd_measurement(self) -> FeedbackConfirmedItem:
+        if self.measure_type == "COUNT":
+            if self.quantity is None or not 1 <= self.quantity <= 100 or self.weight_value is not None or self.weight_unit != "NONE":
+                raise ValueError("COUNT는 1~100 quantity만 가지며 weightValue=null, weightUnit=NONE이어야 합니다")
+        elif self.quantity is not None or self.weight_value is None or self.weight_value <= 0 or self.weight_unit == "NONE":
+            raise ValueError("WEIGHT는 quantity=null, weightValue>0, weightUnit=G 또는 ML이어야 합니다")
+        return self
+
+
+class FeedbackItem(BaseModel):
+    item_id: str | None = Field(default=None, alias="itemId", max_length=64)
+    action: FeedbackAction
+    confirmed: FeedbackConfirmedItem | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    # 동작별로 필요한 itemId·확정값 조합을 검증하고 자신을 반환한다.
+    def validate_action_fields(self) -> FeedbackItem:
+        if self.action == FeedbackAction.ADDED:
+            if self.item_id is not None or self.confirmed is None:
+                raise ValueError("ADDED는 itemId 없이 confirmed만 가져야 합니다")
+        elif self.item_id is None:
+            raise ValueError(f"{self.action.value}에는 itemId가 필요합니다")
+        elif self.action == FeedbackAction.CORRECTED and self.confirmed is None:
+            raise ValueError("CORRECTED에는 confirmed가 필요합니다")
+        elif self.action in {FeedbackAction.CONFIRMED, FeedbackAction.DELETED} and self.confirmed is not None:
+            raise ValueError(f"{self.action.value}에는 confirmed를 보내지 않습니다")
+        return self
+
+
+class FeedbackRequest(BaseModel):
+    refrigerator_id: int = Field(alias="refrigeratorId", gt=0)
+    model_improvement_consent: bool = Field(alias="consentForModelImprovement")
+    items: list[FeedbackItem] = Field(min_length=1, max_length=100)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    # 같은 분석 항목을 두 번 보내지 않았는지 확인하고 자신을 반환한다.
+    def validate_unique_items(self) -> FeedbackRequest:
+        item_ids = [item.item_id for item in self.items if item.item_id is not None]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("같은 itemId를 두 번 보낼 수 없습니다")
+        return self
+
+
+class FeedbackItemResult(BaseModel):
+    item_id: str | None = Field(alias="itemId")
+    action: FeedbackAction
+    training_eligibility: TrainingEligibility = Field(alias="trainingEligibility")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FeedbackRecorded(BaseModel):
+    feedback_id: str = Field(alias="feedbackId")
+    analysis_id: str = Field(alias="analysisId")
+    status: Literal["RECORDED"] = "RECORDED"
+    model_improvement_consent: bool = Field(alias="modelImprovementConsent")
+    items: list[FeedbackItemResult]
+    recorded_at: datetime = Field(alias="recordedAt")
+
+    model_config = ConfigDict(populate_by_name=True)

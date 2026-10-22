@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 from app.adapters.callback import CallbackDelivery, build_callback_payload
 from app.analysis_graph import AnalysisGraph
 from app.config import Settings
-from app.errors import AnalysisQueueFull, AppError, ModelUnavailable
+from app.errors import AnalysisNotFound, AnalysisQueueFull, AppError, ModelUnavailable
+from app.feedback import FeedbackRepository, FeedbackService
 from app.monitoring.metrics import (
     ANALYSIS_ACTIVE,
     ANALYSIS_DURATION,
@@ -24,6 +25,7 @@ from app.pipeline import ReceiptAnalysisPipeline
 from app.schemas import (
     AnalysisAccepted,
     AnalysisCreateRequest,
+    AnalysisView,
     ErrorBody,
     InternalStage,
 )
@@ -33,10 +35,20 @@ logger = logging.getLogger(__name__)
 
 
 class AnalysisRuntime:
-    # 설정·저장소·파이프라인·콜백을 받아 다중 소비자 분석 런타임을 구성한다.
-    def __init__(self, settings: Settings, store: InMemoryAnalysisStore, pipeline: ReceiptAnalysisPipeline, callback: CallbackDelivery) -> None:
+    # 설정·저장소·파이프라인·콜백과 선택적 영속 이력·피드백 서비스를 받아 다중 소비자 분석 런타임을 구성한다.
+    def __init__(
+        self,
+        settings: Settings,
+        store: InMemoryAnalysisStore,
+        pipeline: ReceiptAnalysisPipeline,
+        callback: CallbackDelivery,
+        history: FeedbackRepository | None = None,
+        feedback: FeedbackService | None = None,
+    ) -> None:
         self.settings = settings
         self.store = store
+        self.history = history
+        self.feedback = feedback
         self.pipeline = pipeline
         self.analysis_graph = AnalysisGraph(
             pipeline,
@@ -90,6 +102,8 @@ class AnalysisRuntime:
                     await task
         await self.callback.close()
         await self.pipeline.close()
+        if self.history is not None and hasattr(self.history, "close"):
+            await self.history.close()
         ANALYSIS_ACTIVE.set(0)
         ANALYSIS_QUEUE_SIZE.set(0)
         logger.info("runtime.stopped")
@@ -202,6 +216,14 @@ class AnalysisRuntime:
                 self.queue.task_done()
                 self.refresh_metrics()
 
+            if view.completed_at is not None and self.history is not None:
+                # 메모리 결과는 1시간 뒤 사라지므로 피드백·재조회를 위해 DB에도 남긴다. 저장 실패는
+                # 분석 결과와 콜백에 영향을 주지 않는다.
+                try:
+                    await self.history.save_analysis(self.store.get_record(analysis_id))
+                except Exception:
+                    logger.exception("analysis.persist.failed analysis_id=%s", analysis_id)
+
             if view.completed_at is not None:
                 # 콜백 변환·전송 오류가 소비자 코루틴까지 끝내면 이후 큐 작업이 영원히 처리되지 않는다.
                 # 분석 결과는 이미 저장됐으므로 오류만 기록하고 다음 작업으로 넘어간다(GET으로 조회 가능).
@@ -218,6 +240,22 @@ class AnalysisRuntime:
                     )
                 except Exception:
                     logger.exception("callback.delivery.error analysis_id=%s", analysis_id)
+
+    # 메모리에서 분석 view를 찾고, 보관시간이 지나 없으면 영속 이력에서 찾아 반환한다.
+    async def find_view(self, analysis_id: str) -> AnalysisView:
+        try:
+            return self.store.get_view(analysis_id)
+        except AnalysisNotFound:
+            if self.history is None:
+                raise
+        try:
+            view = await self.history.load_analysis(analysis_id)
+        except Exception:
+            logger.exception("analysis.history.load_failed analysis_id=%s", analysis_id)
+            raise AnalysisNotFound() from None
+        if view is None:
+            raise AnalysisNotFound()
+        return view
 
     # 설정된 TTL 주기에 맞춰 완료된 인메모리 분석 결과를 정리한다.
     async def _janitor(self) -> None:

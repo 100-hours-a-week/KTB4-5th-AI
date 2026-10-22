@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Any
 
 from app.adapters._cache import BoundedAsyncCache, LazyPool
@@ -6,10 +8,21 @@ from app.domain.models import ProductCatalogMatch
 from app.errors import DependencyUnavailable
 from app.schemas import Category
 
-# 별칭 정확 일치를 표준명 정확 일치보다 우선한다(priority 오름차순, LIMIT 1).
+logger = logging.getLogger(__name__)
+
+# 사용자 피드백에서 승격한 학습 지식(018 learned_corrections)을 가장 먼저 보고, 그다음 별칭 정확 일치,
+# 표준명 정확 일치 순으로 우선한다(priority 오름차순, LIMIT 1).
 # 바코드 매칭(조회 순서 1번)과 pg_trgm 유사도 매칭(3번)은 지금 파이프라인이 바코드를
 # 추출하지 않고 실제 데이터도 적어 후보 랭킹의 의미가 없어 이번 범위에서 제외했다.
-_LOOKUP_QUERY = """
+_LEARNED_LOOKUP_PART = """
+    SELECT correction_id AS product_id, corrected_name AS canonical_name, category,
+           NULL::VARCHAR AS suggested_storage_type, 0 AS priority
+    FROM receipt_ai.learned_corrections
+    WHERE learning_key = $1 AND is_active
+    UNION ALL
+"""
+
+_CATALOG_LOOKUP_QUERY = """
     SELECT pk.product_id, pk.canonical_name, pk.category, pk.suggested_storage_type, 1 AS priority
     FROM receipt_ai.product_aliases pa
     JOIN receipt_ai.product_knowledge pk ON pk.product_id = pa.product_id
@@ -21,6 +34,10 @@ _LOOKUP_QUERY = """
     ORDER BY priority
     LIMIT 1
 """
+
+_LOOKUP_QUERY = _LEARNED_LOOKUP_PART + _CATALOG_LOOKUP_QUERY
+# 학습 지식 테이블이 없을 때 다시 확인하기까지의 시간.
+_LEARNED_TABLE_RECHECK_SECONDS = 300.0
 
 # 정확 일치가 없을 때만 쓰는 pg_trgm 유사도 폴백. product_aliases는 2건뿐이라
 # 표준명(normalized_name)만 대상으로 한다 — 별칭이 더 쌓이면 그때 UNION으로 확장한다.
@@ -66,24 +83,35 @@ class PostgresProductCatalogLookup:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._pool = LazyPool(self._create_pool)
-        self._cache: BoundedAsyncCache[ProductCatalogMatch | None] = BoundedAsyncCache(settings.reference_cache_max_size)
+        self._cache: BoundedAsyncCache[ProductCatalogMatch | None] = BoundedAsyncCache(
+            settings.reference_cache_max_size,
+            ttl_seconds=settings.product_catalog_cache_ttl_seconds,
+        )
+        # 018 마이그레이션 전 DB(learned_corrections 없음)에서도 카탈로그 조회가 멈추지 않도록,
+        # 테이블이 없다고 확인되면 학습 지식 없이 기존 쿼리로 조회하고 일정 시간 뒤 다시 확인한다.
+        # 배포 후에 마이그레이션을 적용해도 재시작 없이 학습 지식을 쓰기 시작한다.
+        self._learned_table_missing_until = 0.0
 
     # 정규화 상품명으로 별칭·표준명이 정확히 일치하는 카탈로그 항목을 조회해 반환한다.
     # 결과(없음 포함)는 프로세스 메모리에 캐싱해 동일 문자열 재조회 시 DB를 다시 안 부른다.
     async def find(self, normalized_text: str) -> ProductCatalogMatch | None:
         return await self._cache.get_or_load(normalized_text, lambda: self._query(normalized_text))
 
+    # 피드백 학습으로 지식이 바뀐 조회 키의 캐시를 비운다.
+    def forget(self, normalized_text: str) -> None:
+        self._cache.forget(normalized_text)
+
     async def _query(self, normalized_text: str) -> ProductCatalogMatch | None:
         try:
             pool = await self._pool.get()
-            row = await pool.fetchrow(_LOOKUP_QUERY, normalized_text)
+            row = await self._fetch_exact(pool, normalized_text)
             if row is None:
                 if len(normalized_text.replace(" ", "")) < _FUZZY_MIN_QUERY_LENGTH:
                     return None
                 row = await pool.fetchrow(_FUZZY_LOOKUP_QUERY, normalized_text)
                 matched_via = "fuzzy"
             else:
-                matched_via = "exact"
+                matched_via = "learned" if row.get("priority") == 0 else "exact"
         except DependencyUnavailable:
             raise
         except Exception as exc:
@@ -102,6 +130,18 @@ class PostgresProductCatalogLookup:
             matched_via=matched_via,
             similarity=row["sim"] if matched_via == "fuzzy" else None,
         )
+
+    # 학습 지식·별칭·표준명 정확 일치를 조회한다. 학습 지식 테이블이 없으면 기존 쿼리로 대체한다.
+    async def _fetch_exact(self, pool: Any, normalized_text: str) -> Any:
+        if time.monotonic() >= self._learned_table_missing_until:
+            try:
+                return await pool.fetchrow(_LOOKUP_QUERY, normalized_text)
+            except Exception as exc:
+                if type(exc).__name__ != "UndefinedTableError":
+                    raise
+                self._learned_table_missing_until = time.monotonic() + _LEARNED_TABLE_RECHECK_SECONDS
+                logger.warning("product_catalog.learned_corrections_missing fallback=catalog_only")
+        return await pool.fetchrow(_CATALOG_LOOKUP_QUERY, normalized_text)
 
     # 열려 있는 연결 pool이 있으면 닫는다.
     async def close(self) -> None:

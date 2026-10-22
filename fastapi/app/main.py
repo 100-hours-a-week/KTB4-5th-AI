@@ -6,12 +6,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 
 from app.adapters.callback import CallbackDelivery
+from app.adapters.feedback_repository import PostgresFeedbackRepository
 from app.adapters.product_catalog import PostgresProductCatalogLookup
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.adapters.shelf_life import PostgresShelfLifeLookup
 from app.config import Settings, get_settings
 from app.error_handlers import handle_app_error, handle_validation_error
 from app.errors import AppError
+from app.feedback import FeedbackService
 from app.logging import ApiAuditLogMiddleware, configure_logging, shutdown_logging
 from app.pipeline import ReceiptAnalysisPipeline
 from app.routers import analyses, health, metrics, status
@@ -35,7 +37,9 @@ def build_runtime(settings: Settings) -> AnalysisRuntime:
         max_entries=settings.analysis_result_max_entries,
     )
 
-    return AnalysisRuntime(settings, store, pipeline, CallbackDelivery(settings))
+    history = PostgresFeedbackRepository(settings) if settings.database_url else None
+    feedback = FeedbackService(settings, store, history, product_catalog_lookup)
+    return AnalysisRuntime(settings, store, pipeline, CallbackDelivery(settings), history=history, feedback=feedback)
 
 
 # 설정과 선택 런타임으로 미들웨어·예외 처리·router가 조립된 앱을 반환한다.

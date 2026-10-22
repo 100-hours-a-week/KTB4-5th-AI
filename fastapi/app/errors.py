@@ -28,6 +28,16 @@ class AnalysisNotFound(AppError):
         super().__init__("ANALYSIS_NOT_FOUND", "분석 작업을 찾을 수 없습니다.", 404)
 
 
+class AnalysisNotCompleted(AppError):
+    # 완료되지 않았거나 실패한 분석에 피드백을 보낸 경우의 HTTP 409 예외를 구성한다.
+    def __init__(self) -> None:
+        super().__init__(
+            "ANALYSIS_NOT_COMPLETED",
+            "완료된 분석 결과에만 피드백을 기록할 수 있습니다.",
+            409,
+        )
+
+
 class IdempotencyConflict(AppError):
     # 동일 requestId의 내용 충돌을 나타내는 HTTP 409 예외를 구성한다.
     def __init__(self) -> None:

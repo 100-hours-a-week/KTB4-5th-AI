@@ -76,12 +76,14 @@ _CATEGORY_SOURCE_BY_REASON = {
     "keyword_rule": Source.BUSINESS_RULE,
     "catalog": Source.CATALOG,
     "catalog_fuzzy": Source.CATALOG_FUZZY,
+    "learned_correction": Source.CATALOG,
 }
 
 _PRODUCT_NAME_SOURCE_BY_REASON = {
     "keyword_rule": Source.OCR,
     "catalog": Source.CATALOG,
     "catalog_fuzzy": Source.CATALOG_FUZZY,
+    "learned_correction": Source.CATALOG,
     "vision_model": Source.VISION,
     "yolo_crop_vision_model": Source.VISION,
     "ocr_keyword_rule": Source.OCR,
@@ -275,6 +277,8 @@ class ReceiptAnalysisPipeline:
                     reason = "catalog_fuzzy"
                     # 유사도 매칭은 정확 일치보다 신뢰도를 낮춰 review에서 구분되게 한다.
                     confidence = min(confidence, catalog_match.similarity or 0.6)
+                elif catalog_match.matched_via == "learned":
+                    reason = "learned_correction"
                 else:
                     reason = "catalog"
             if resolved is None:
@@ -423,10 +427,10 @@ class ReceiptAnalysisPipeline:
             confidence = min(line.confidence, 0.9)
 
             if use_catalog:
-                reason = "catalog_fuzzy" if catalog_match.matched_via == "fuzzy" else "catalog"
+                reason = _catalog_reason(catalog_match)
                 confidence = min(
                     line.confidence,
-                    catalog_match.similarity or (0.98 if reason == "catalog" else 0.6),
+                    catalog_match.similarity or (0.6 if reason == "catalog_fuzzy" else 0.98),
                 )
 
             deduplication_key = normalize_product_name(normalized_name)
@@ -456,7 +460,7 @@ class ReceiptAnalysisPipeline:
                         normalized_name=catalog_match.canonical_name,
                         category=catalog_match.category,
                         confidence=min(candidate.confidence, catalog_match.similarity or 0.98),
-                        reason="catalog_fuzzy" if catalog_match.matched_via == "fuzzy" else "catalog",
+                        reason=_catalog_reason(catalog_match),
                     )
                 deduplication_key = normalize_product_name(candidate.normalized_name)
                 if not deduplication_key or any(_similar_product_names(deduplication_key, seen_name) for seen_name in seen_names):
@@ -665,8 +669,9 @@ class ReceiptAnalysisPipeline:
         # "불향차돌떡볶이"를 "떡볶이"로 줄이는 문제). 표시값은 행번호·가격·용량만 뗀 OCR 상품명이고,
         # 모델·카탈로그 표준명은 normalizedValue로만 전달한다. 실물 사진은 비전 모델이 이미지에서
         # 직접 읽은 이름이 OCR 조각보다 정확해 기존처럼 정규화 이름을 표시한다.
+        # 단, 사용자 피드백으로 학습한 지식이 고른 이름은 사용자들이 OCR 오독을 직접 고친 값이므로 표시한다.
         display_name = normalized
-        if document_type == "RECEIPT":
+        if document_type == "RECEIPT" and selected_line.reason != "learned_correction":
             display_name = normalize_product_name(correct_common_ocr_errors(original_text).lstrip("*#≠ ")) or normalized
 
         return ReceiptItem(
@@ -777,6 +782,11 @@ class ReceiptAnalysisPipeline:
         average = sum(line.confidence for line in lines) / len(lines)
         issues = [] if average >= 0.7 else ["LOW_OCR_CONFIDENCE"]
         return ImageQuality(score=max(0.0, min(average, 1.0)), issues=issues)
+
+
+# 카탈로그 매칭 방식을 분류 사유(출처 결정에 쓰는 키)로 바꿔 반환한다.
+def _catalog_reason(match: ProductCatalogMatch) -> str:
+    return {"fuzzy": "catalog_fuzzy", "learned": "learned_correction"}.get(match.matched_via, "catalog")
 
 
 # 공백·기호가 제거된 두 상품명이 철자 한두 글자만 다른 동일 후보인지 반환한다.

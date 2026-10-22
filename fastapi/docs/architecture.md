@@ -14,10 +14,11 @@
   다시 실행한다. 멀티스텝 에이전트가 아니라 재시도 래퍼로만 쓴다.
 - FastAPI는 `uvicorn --workers 1`로 실행한다. 동시 처리는 프로세스를 늘리는 게 아니라 이
   프로세스 안의 컨슈머 태스크(`ANALYSIS_CONSUMER_COUNT`)로 한다.
-  큐·분석 상태·결과는 프로세스 메모리에만 있고([app/store.py](../app/store.py)),
-  재시작하면 사라진다.
-- PostgreSQL(`receipt_ai` 스키마)은 상품 카탈로그·소비기한 규칙 같은 **보조 참조 데이터**만
-  갖는다. 분석 이력·아이템은 이번 범위에서는 별도로 영속화하지 않는다 — 자세한 내용은
+  큐와 진행 중인 분석 상태는 프로세스 메모리에만 있고([app/store.py](../app/store.py)),
+  재시작하면 사라진다. 완료·실패한 결과는 메모리에 1시간 두는 것과 별도로 PostgreSQL
+  `receipt_analyses`에 90일 저장해, 메모리에서 사라진 뒤에도 GET 조회와 피드백 원본으로 쓴다.
+- PostgreSQL(`receipt_ai` 스키마)은 상품 카탈로그·소비기한 규칙 같은 **보조 참조 데이터**와
+  분석 결과 이력, 사용자 피드백, 피드백에서 승격한 학습 지식을 갖는다 — 자세한 내용은
   [database.md](./database.md).
 - 이미지 바이너리는 저장하지도 중계하지도 않는다. `objectKey` + `sha256`만 받아 Worker에
   서명 URL로 넘기고, Worker가 내려받아 해시를 검증한다.
@@ -121,6 +122,20 @@ sequenceDiagram
 
 `200`이 아니어도 `429`·`500`·`502`·`503`·`504`·연결 실패·타임아웃만 같은 본문을 재전송하고(최대 3회),
 `400`·`401`·`409` 등은 재전송하지 않는다. 재전송은 분석을 다시 실행하지 않는다.
+
+### 피드백 학습
+
+백엔드는 사용자가 분석 결과를 재고로 등록할 때 분석 한 건의 항목별 처리 결과(`CONFIRMED`·`CORRECTED`·
+`ADDED`·`DELETED`)를 보낸다([app/feedback.py](../app/feedback.py)). 학습 대상은 모델 개선에 동의한
+사용자가 **수정(`CORRECTED`)한 항목의 상품명·카테고리**뿐이다. 새로 추가하거나 삭제한 상품은 AI 결과가
+아니라 사용자 판단이라 학습하지 않는다.
+
+학습 키는 원본 항목의 OCR 원문을 카탈로그 조회와 같은 규칙으로 정규화한 값이다. 같은 키를 서로 다른
+냉장고 `FEEDBACK_PROMOTION_MIN_SUPPORT`(기본 3)곳 이상이 같은 이름·카테고리로 고쳤고, 의견을 낸 냉장고
+중 그 값의 비율이 `FEEDBACK_PROMOTION_MIN_AGREEMENT`(기본 0.8) 이상이면 `learned_corrections`로 승격한다.
+상품 카탈로그 조회는 이 학습 지식을 별칭·표준명보다 먼저 보며, 영수증에서 학습 지식으로 고른 상품은 OCR
+원문 대신 고친 이름을 표시한다. 기존 카탈로그·별칭은 바꾸지 않으므로 잘못 승격된 지식은 `is_active`만 끄면
+된다. 학습은 EC2 PostgreSQL에 쌓이므로 RunPod Worker 교체·마이그레이션과 무관하다.
 
 ## 동시성과 메모리 관리
 
@@ -226,7 +241,8 @@ app/
 | Method | Endpoint | 역할 |
 | --- | --- | --- |
 | `POST` | `/ai/v1/analyses` | 영수증·실물 분석 접수, `202 Accepted` |
-| `GET` | `/ai/v1/analyses/{analysisId}` | 작업 상태와 결과 확인 |
+| `GET` | `/ai/v1/analyses/{analysisId}` | 작업 상태와 결과 확인. 메모리에 없으면 PostgreSQL 이력에서 조회 |
+| `POST` | `/ai/v1/analyses/{analysisId}/feedback` | 사용자 확정값 기록. 동의한 수정의 상품명·카테고리만 학습 후보([피드백 학습](#피드백-학습)) |
 | `GET` | `/ai/v1/models/status` | GPU Worker 준비 상태(`remoteInference`), 큐 크기·용량, 동시 처리 수(`activeCount`) |
 | `GET` | `/health/live` | 프로세스 생존 확인 |
 | `GET` | `/health/ready` | 모델 포함 준비 상태 확인 |

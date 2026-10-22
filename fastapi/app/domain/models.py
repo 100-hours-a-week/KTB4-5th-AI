@@ -52,7 +52,7 @@ class ProductCatalogMatch:
     canonical_name: str
     category: Category
     suggested_storage_type: str | None
-    matched_via: str = "exact"  # "exact" | "fuzzy"
+    matched_via: str = "exact"  # "exact" | "fuzzy" | "learned"(피드백 학습 지식)
     similarity: float | None = None
 
 

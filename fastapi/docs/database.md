@@ -4,13 +4,15 @@
 
 이 스키마는 현재 런타임에서 영수증 AI의 **보조 참조 데이터**만 관리한다. 백엔드 MySQL의 `ingredients`가
 사용자 냉장고 재고의 원본이며, PostgreSQL의 `product_knowledge`는 재고나 재료 마스터가
-아니다. 레시피 관련 테이블은 이번 범위에서 제외했다. 분석 요청·결과는 현재 DB에 영속화하지
-않는다(프로세스 메모리) — 자세한 내용은 [architecture.md](./architecture.md).
+아니다. 레시피 관련 테이블은 이번 범위에서 제외했다. 분석 큐와 진행 상태는 프로세스 메모리에 두고,
+완료·실패한 분석 결과와 사용자 피드백, 피드백에서 승격한 학습 지식은 이 스키마에 저장한다 — 자세한
+내용은 [architecture.md](./architecture.md).
 
-`002_receipt_analysis_history.sql`과 그 테이블을 보완하는 `004`, `013`, `014`는 과거 영속화
-검토 때 작성한 **미사용 스키마**다. 현재 애플리케이션은 이 테이블에 읽거나 쓰지 않으며, 운영
-기동에 필요한 마이그레이션은 상품·별칭·보관기간 참조 데이터 계열이다. 향후 영속 작업 복구를
-도입하기 전까지 분석 이력 테이블을 현재 기능으로 설명하지 않는다.
+`002_receipt_analysis_history.sql`의 `receipt_analyses`는 완료·실패한 분석 결과를 `final_payload`
+(GET 응답과 같은 JSON)로 저장하는 데 사용한다. 같은 마이그레이션의 `receipt_analysis_items`와 이를
+보완하는 `004`, `013`, `014`의 항목 제약은 현재 응답 규칙(예: `WEIGHT` 항목의 구매 수량)과 맞지 않아
+**사용하지 않는다**. 피드백은 원본 항목을 `receipt_item_feedback.original_item`에 복사해 두므로 항목
+테이블 없이도 비교·학습할 수 있다.
 
 마이그레이션은 목적별로 분리되어 있다.
 
@@ -19,7 +21,7 @@
 | `001_shelf_life_and_product_knowledge.sql` | `product_knowledge` | 상품 정규화·카테고리 분류 보조 자료 | 보조 자료 |
 | | `product_aliases` | OCR 오인식·축약 상품명 별칭 | 보조 자료 |
 | | `shelf_life_rules` | 출처가 검수된 관리용 소비기한 추정 규칙 | 보조 자료 |
-| `002_receipt_analysis_history.sql` | `receipt_analyses` | 과거 검토용 분석 이력 스키마. 현재 코드 미사용 | 미사용 |
+| `002_receipt_analysis_history.sql` | `receipt_analyses` | 완료·실패 분석 결과를 저장해 인메모리 TTL 이후의 결과 조회와 피드백 원본 확인에 사용 | 분석 이력 원본 |
 | | `receipt_analysis_items` | 과거 검토용 항목 이력 스키마. 현재 코드 미사용 | 미사용 |
 | `003_product_catalog_seed.sql` | (INSERT만) | `product_knowledge` 초기 시드 31건 | 시드 데이터 |
 | `004_catalog_fuzzy_source.sql` | (제약 변경만) | `receipt_analysis_items.category_source`에 `CATALOG_FUZZY` 허용 | 스키마 변경 |
@@ -35,6 +37,8 @@
 | `014_expiration_use_by_only.sql` | `receipt_analysis_items` 제약 변경 | 기존 `SELL_BY`를 `USE_BY`로 변환하고 날짜 용어를 소비기한으로 통일 | 스키마 변경 |
 | `015_product_vision_catalog_seed.sql` | (INSERT만) | 다중 실물 상품 실험에서 확인한 상품명 8건과 반복 오인식 별칭 6건 | 시드 데이터 |
 | `016_rename_categories_to_backend_codes.sql` | (제약·UPDATE) | 카테고리 코드를 백엔드 명세와 통일: `GRAIN_NOODLE→GRAINS_NOODLE`, `PROCESSED→PROCESSED_FOOD`, `ETC→OTHER`. 앱 배포 전에 적용 | 스키마·데이터 변경 |
+| `017_shelf_life_rules_leafy_greens_broccoli.sql` | (INSERT만) | 깻잎·브로콜리 냉장 보관 참고 범위(USDA ARS Handbook 66) | 시드 데이터 |
+| `018_feedback_learning.sql` | `receipt_item_feedback`, `learned_corrections` | 사용자 피드백과 피드백에서 승격한 학습 지식. 상품 카탈로그 조회 쿼리가 `learned_corrections`를 읽으므로 **앱 배포 전에 적용** | 스키마 변경 |
 
 아래 본문의 실험 기록에 나오는 `PROCESSED` 등 이전 카테고리 코드는 016 적용 전 기록이다.
 | `015_product_vision_catalog_seed.sql` | (INSERT만) | 실물 상품 실험에서 확인한 상품명과 OCR 별칭 8건 보강 | 시드 데이터 |

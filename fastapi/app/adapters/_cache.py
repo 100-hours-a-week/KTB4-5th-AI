@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Generic, TypeVar
@@ -15,24 +16,32 @@ class BoundedAsyncCache(Generic[T]):
     발생하지 않는다. 더 강한 요청 합치기가 필요해지면 키별 락으로 교체한다.
     """
 
-    def __init__(self, max_size: int) -> None:
+    def __init__(self, max_size: int, ttl_seconds: float | None = None) -> None:
         self._max_size = max_size
-        self._store: OrderedDict[str, T] = OrderedDict()
+        self._ttl_seconds = ttl_seconds
+        self._store: OrderedDict[str, tuple[T, float]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     # 캐시에 있으면 반환하고, 없으면 loader를 실행해 결과를 캐싱한 뒤 반환한다.
     async def get_or_load(self, key: str, loader: Callable[[], Awaitable[T]]) -> T:
         async with self._lock:
             if key in self._store:
-                self._store.move_to_end(key)
-                return self._store[key]
+                value, stored_at = self._store[key]
+                if self._ttl_seconds is None or time.monotonic() - stored_at < self._ttl_seconds:
+                    self._store.move_to_end(key)
+                    return value
+                self._store.pop(key, None)
         value = await loader()
         async with self._lock:
-            self._store[key] = value
+            self._store[key] = (value, time.monotonic())
             self._store.move_to_end(key)
             while len(self._store) > self._max_size:
                 self._store.popitem(last=False)
         return value
+
+    # 원본 데이터가 바뀐 키의 캐시를 비워 다음 조회 때 다시 읽게 한다.
+    def forget(self, key: str) -> None:
+        self._store.pop(key, None)
 
 
 class LazyPool(Generic[T]):
