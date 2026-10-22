@@ -2,11 +2,16 @@ name: RunPod 예약 시작 및 정지
 
 on:
   schedule:
-    # GitHub Actions cron은 지연되거나 한 회가 누락될 수 있어 5분 간격의 실행 창을 둔다.
-    # UTC 23:30~00:25는 한국 시간 08:30~09:25, UTC 09:00~09:25는 18:00~18:25다.
-    - cron: "30-59/5 23 * * *"
-    - cron: "0-25/5 0 * * *"
-    - cron: "0-25/5 9 * * *"
+    # 시작 창 한국 시간 08:33~08:58(UTC 23시), 정지 창 18:03~18:28(UTC 9시)에 5분마다 실행한다.
+    # 몰리는 정각·30분은 피했다. 한 창 안에서 한 회가 빠져도 다음 회가 같은 작업을 다시 시도한다.
+    - cron: "33-58/5 23 * * *"
+    - cron: "3-28/5 9 * * *"
+    # 창 밖에서도 30분마다 상태를 맞춘다. 낮에 꺼져 있으면 다시 켜고, 밤에 켜져 있으면 끈다.
+    # 창의 예약이 모두 빠지거나 낮에 Pod가 멈춰도 다음 회가 바로잡는다.
+    - cron: "13,43 * * * *"
+    # GitHub Actions cron은 몇 시간씩 늦게 도착할 수 있으므로 어떤 cron이 실행됐는지가 아니라 실행 시점의
+    # 한국 시간으로 작업(08:30~17:59 start, 그 밖에는 stop)을 정한다. 아침 트리거가 18시 넘어 도착해도
+    # Pod를 다시 켜지 않는다.
   workflow_dispatch:
     inputs:
       action:
@@ -46,15 +51,13 @@ jobs:
         id: operation
         env:
           MANUAL_ACTION: ${{ inputs.action }}
-          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             action="${MANUAL_ACTION}"
-          elif [[ "${SCHEDULE_EXPRESSION}" == "0-25/5 9 * * *" ]]; then
-            action="stop"
           else
-            action="start"
+            action="$(bash .github/scripts/runpod_desired_action.sh)"
           fi
+          echo "현재 한국 시간 $(TZ=Asia/Seoul date '+%F %H:%M'), 작업: ${action}"
           echo "action=${action}" >> "$GITHUB_OUTPUT"
       - name: RunPod 제어
         env:
@@ -65,6 +68,9 @@ jobs:
             exit 0
           fi
 
+          # 예약 실행은 같은 창의 다음 회차가 다시 시도하므로 20분까지만 재시도하고 실패로 남긴다.
+          # 수동 실행은 성공할 때까지 재시도한다(job timeout까지).
+          deadline=$((SECONDS + 1200))
           group=1
           while true; do
             for attempt in 1 2 3; do
@@ -76,6 +82,16 @@ jobs:
                 sleep 30
               fi
             done
+            if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+              if [[ "$(bash .github/scripts/runpod_desired_action.sh)" != "${ACTION}" ]]; then
+                echo "재시도 중 목표 상태가 바뀌었습니다. 다음 예약 실행에 맡깁니다."
+                exit 0
+              fi
+              if [[ "${SECONDS}" -ge "${deadline}" ]]; then
+                echo "::error::${ACTION} 재시도 시간을 넘겼습니다. 다음 예약 실행에서 다시 시도합니다."
+                exit 1
+              fi
+            fi
             echo "${ACTION} 3회 실패. 5분 뒤 다시 시도합니다."
             group=$((group + 1))
             sleep 300
