@@ -171,6 +171,14 @@ class RemoteInferenceClient:
                 return self._discovered_url
             return await self._discover_worker()
 
+    # 이미지 경로와 같은 인증·Pod 탐색을 사용하되 레시피 추론은 재시도 없이 제한 시간 내 호출한다.
+    async def reason_recipe(self, payload: dict, timeout: float) -> dict:
+        worker_url = await self._worker_url()
+        headers = {"X-Worker-API-Key": self._settings.remote_inference_api_key or ""}
+        response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=payload, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
     async def _discover_worker(self) -> str:
         headers = {"Authorization": f"Bearer {self._settings.runpod_api_key}"}
         response = await self._client.get("https://api.runpod.io/v2/pods", params={"limit": 1000}, headers=headers)

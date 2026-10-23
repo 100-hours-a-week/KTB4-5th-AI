@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from app.schemas import Category
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+Strategy = Literal["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"]
 
 
 # 재료 문자열을 NFKC·소문자·공백 제거로 정규화한다. 의미상 동의어를 임의로 생성하지 않는다.
@@ -62,10 +63,16 @@ class RecommendationRequest(Contract):
     inventory: list[InventoryItem] = Field(max_length=300)
     excludedIngredientNames: list[Text] = Field(default_factory=list, max_length=100)
     limit: int = Field(default=5, ge=1, le=20)
+    targetServings: int = Field(default=2, ge=1, le=12, strict=True)
+    strategies: list[Strategy] = Field(default_factory=lambda: ["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"], min_length=1, max_length=3)
+    # 냉장고 재고와 분리한, 호출자가 명시적으로 보유를 확인한 기본 양념. 분량은 보증하지 않는다.
+    pantryIngredientNames: list[Text] = Field(default_factory=list, max_length=30)
 
     # 중복 재고 ID와 정규화 재고 fingerprint 일치 여부를 확인한다.
     @model_validator(mode="after")
     def validate_inventory(self) -> "RecommendationRequest":
+        if len(self.strategies) != len(set(self.strategies)):
+            raise ValueError("strategies가 중복됩니다.")
         if len({item.ingredientId for item in self.inventory}) != len(self.inventory):
             raise ValueError("ingredientId가 중복됩니다.")
         if self.inventoryFingerprint != inventory_fingerprint(self.inventory):
@@ -132,6 +139,26 @@ class ScoreBreakdown(Contract):
     variety: float = Field(ge=0, le=1)
 
 
+class IngredientRequirement(Contract):
+    ingredientNo: int
+    name: str
+    amountText: str | None
+    requiredAmount: float | None
+    unit: Literal["EA", "G", "ML"] | None
+    allocatedAmount: float | None
+    shortageAmount: float | None
+    status: Literal["SUFFICIENT", "SHORTAGE", "UNKNOWN_AMOUNT", "UNIT_MISMATCH", "PANTRY_UNVERIFIED"]
+
+
+class InventoryUsage(Contract):
+    ingredientId: int
+    name: str
+    unit: Literal["EA", "G", "ML"]
+    availableAmount: float
+    usedAmount: float
+    remainingAmount: float
+
+
 class RecommendedRecipe(RecipeSnapshot):
     score: float = Field(ge=0, le=1)
     scoreBreakdown: ScoreBreakdown
@@ -140,6 +167,29 @@ class RecommendedRecipe(RecipeSnapshot):
     missingIngredients: list[str]
     excludedIngredientCheck: Literal["PASSED"]
     reason: str
+    strategy: Strategy | None = None
+    targetServings: int = 2
+    quantityStatus: Literal["SUFFICIENT", "SHORTAGE", "NEEDS_CHECK"] = "NEEDS_CHECK"
+    ingredientRequirements: list[IngredientRequirement] = Field(default_factory=list)
+    inventoryUsage: list[InventoryUsage] = Field(default_factory=list)
+    essentialIngredientNos: list[int] = Field(default_factory=list)
+    missingEssentialIngredientNos: list[int] = Field(default_factory=list)
+    feasibility: Literal["NEEDS_SHOPPING", "NEEDS_CHECK", "QUANTITY_VERIFIED"] = "NEEDS_CHECK"
+    preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
+
+
+class RecommendationTrace(Contract):
+    policyVersion: str = "recipe-meal-plan-v2"
+    model: str | None = None
+    promptVersion: str | None = None
+    aiCalls: int = 0
+    searchCount: int = 0
+    candidateCount: int = 0
+
+
+class MealPlan(Contract):
+    focusIngredientIds: list[int] = Field(default_factory=list)
+    ideas: list[str] = Field(default_factory=list)
 
 
 class RecommendationResponse(Contract):
@@ -149,6 +199,10 @@ class RecommendationResponse(Contract):
     recommendationMode: str
     recommendations: list[RecommendedRecipe]
     generatedAt: datetime
+    recommendationEngine: Literal["AI", "RULE_FALLBACK", "EMPTY"] = "RULE_FALLBACK"
+    mealPlan: MealPlan = Field(default_factory=MealPlan)
+    warnings: list[str] = Field(default_factory=list)
+    trace: RecommendationTrace = Field(default_factory=RecommendationTrace)
 
 
 class ChangesResponse(Contract):

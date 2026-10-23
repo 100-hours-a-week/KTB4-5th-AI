@@ -4,6 +4,8 @@
 문자 인식, 상품 영역 검출과 멀티모달 모델 추론을 수행하고 구조화된 원시 결과를 FastAPI 서버에
 반환한다.
 
+레시피에서는 기존 Gemma로 텍스트 계획·후보 선택도 수행한다. `POST /internal/v1/recipes/reason`은 PLAN/SELECT만 받고 기존 `X-Worker-API-Key`로 인증한다. DB 검색·분량 계산·재고 차감 권한은 Worker에 없으며 FastAPI가 준 후보 ID와 원천 재료 번호만 제안한다. `gpu_worker/recipe_reasoner.py`가 JSON Schema 출력을 검증하고 `recipe_contract.py`가 공통 계약을 정의한다. 사진과 같은 inference/LLM 세마포어를 공유하므로 자원 경합이 발생할 수 있다.
+
 Worker는 재고 서비스의 업무 규칙을 소유하지 않는다. PostgreSQL을 조회하거나 소비기한을 확정하지
 않고, 분석 큐와 백엔드 콜백도 관리하지 않는다. 이 경계를 지켜야 모델 구성이나 GPU 제공자를 바꿔도
 EC2 FastAPI와 백엔드 계약을 그대로 유지할 수 있다.

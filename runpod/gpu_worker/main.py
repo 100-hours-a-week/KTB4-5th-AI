@@ -13,11 +13,16 @@ from app.errors import AppError, UnauthorizedService
 from app.monitoring.metrics import WORKER_INFLIGHT, WORKER_REQUESTS, observe_diagnostics, render_metrics
 from app.schemas import RemoteInferenceRequest, RemoteInferenceResponse
 from gpu_worker.engine import GpuInferenceEngine
+from gpu_worker.recipe_contract import RecipeAiRequest, RecipeAiResponse
 
 logger = logging.getLogger(__name__)
 
 
 class WorkerEngine(Protocol):
+    # 원천 후보에 근거한 레시피 계획·선택 결과를 반환한다.
+    async def reason_recipe(self, request: RecipeAiRequest) -> RecipeAiResponse:
+        ...
+
     # 원격 추론 요청을 처리해 구조화 결과를 반환한다.
     async def infer(self, request: RemoteInferenceRequest) -> RemoteInferenceResponse:
         ...
@@ -90,6 +95,10 @@ def create_worker_app(settings: Settings | None = None, engine: WorkerEngine | N
             raise
         finally:
             WORKER_INFLIGHT.dec()
+
+    @application.post("/internal/v1/recipes/reason", response_model=RecipeAiResponse, dependencies=[Depends(authenticate_worker)])
+    async def reason_recipe(payload: RecipeAiRequest, current_engine: Annotated[WorkerEngine, Depends(get_engine)]) -> RecipeAiResponse:
+        return await current_engine.reason_recipe(payload)
 
     @application.get("/metrics", include_in_schema=False, dependencies=[Depends(authenticate_worker)])
     async def metrics() -> Response:

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
 
     database_url: str | None = None
     recipe_cache_ttl_seconds: float = Field(default=300, ge=1, le=3600)
+    recipe_ai_enabled: bool = True
+    recipe_ai_timeout_seconds: float = Field(default=45, ge=1, le=120)
+    recipe_ai_max_candidates: int = Field(default=12, ge=3, le=20)
     recipe_food_safety_api_key: str | None = Field(default=None, repr=False)
     # 원문 저장·재배포 조건을 확인한 운영자만 활성화한다. 키만 넣어도 자동으로 켜지지 않는다.
     recipe_food_safety_storage_approved: bool = False

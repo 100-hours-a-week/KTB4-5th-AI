@@ -20,6 +20,7 @@ from app.domain.receipt_rules import (
     known_food_category,
     sanitize_lines,
 )
+from app.errors import ModelUnavailable
 from app.schemas import (
     InputHint,
     RemoteInferenceRequest,
@@ -29,6 +30,8 @@ from app.schemas import (
     RemoteOcrLine,
 )
 from gpu_worker.image_downloader import SecureImageDownloader
+from gpu_worker.recipe_contract import RecipeAiRequest, RecipeAiResponse
+from gpu_worker.recipe_reasoner import RecipeTextReasoner
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ class GpuInferenceEngine:
         self._inference_semaphore = asyncio.Semaphore(settings.worker_max_concurrency)
         self._ocr_semaphore = asyncio.Semaphore(settings.worker_ocr_max_concurrency)
         self._llm_semaphore = asyncio.Semaphore(settings.worker_llm_max_concurrency)
+        self._recipe_reasoner = RecipeTextReasoner(settings)
         self._downloader = SecureImageDownloader(settings)
         self._ocr = PaddleTextExtractorPool(settings)
         classifier_enabled = settings.input_classifier_backend == "onnx" or (settings.input_classifier_backend == "auto" and Path(settings.input_classifier_model_path).is_file())
@@ -54,6 +58,13 @@ class GpuInferenceEngine:
             self._product_detector = YoloESegProductDetector(settings)
         else:
             self._product_detector = YoloWorldProductDetector(settings) if detector_enabled else None
+
+    # 레시피 텍스트 판단도 사진 분석과 같은 LLM 슬롯을 공유해 GPU 과할당을 방지한다.
+    async def reason_recipe(self, request: RecipeAiRequest) -> RecipeAiResponse:
+        if not self._settings.worker_enable_llm:
+            raise ModelUnavailable("레시피 판단 모델이 비활성화돼 있습니다.")
+        async with self._inference_semaphore, self._llm_semaphore:
+            return await self._recipe_reasoner.reason(request)
 
     # 이미지 URL을 한 번 내려받아 입력 유형·OCR·식품행 모델 후보를 한 응답으로 반환한다.
     async def infer(self, request: RemoteInferenceRequest) -> RemoteInferenceResponse:
@@ -434,6 +445,7 @@ class GpuInferenceEngine:
 
     # 다운로드 HTTP 연결과 모델 클라이언트를 정리한다.
     async def close(self) -> None:
+        await self._recipe_reasoner.close()
         await self._downloader.close()
         if self._food_classifier is not None:
             await self._food_classifier.close()
