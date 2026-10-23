@@ -6,7 +6,7 @@ from typing import Any
 from app.adapters._cache import LazyPool
 from app.config import Settings
 from app.errors import DependencyUnavailable
-from app.feedback import FeedbackEntry, LearningVote, decide_promotion
+from app.feedback import FeedbackEntry
 from app.schemas import (
     AnalysisView,
     FeedbackAction,
@@ -61,19 +61,6 @@ _INSERT_FEEDBACK = """
     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13, $14)
 """
 
-_LEARNING_VOTES = """
-    SELECT refrigerator_id, target_name, target_normalized_name, target_category
-    FROM receipt_ai.receipt_item_feedback
-    WHERE learning_key = $1 AND training_eligibility IN ('PERSONAL_APPLIED', 'PENDING_REVIEW', 'APPLIED')
-    ORDER BY created_at, feedback_pk
-"""
-
-_ACTIVE_CORRECTION = """
-    SELECT correction_id, normalized_name, category
-    FROM receipt_ai.learned_corrections
-    WHERE learning_key = $1 AND scope = 'GLOBAL' AND is_active
-"""
-
 _ACTIVE_PERSONAL_CORRECTION = """
     SELECT correction_id
     FROM receipt_ai.learned_corrections
@@ -95,39 +82,8 @@ _INSERT_PERSONAL_CORRECTION = """
     VALUES ($1, $2, $3, $4, 1, 1, 'PERSONAL', $5, 'APPROVED')
 """
 
-_UPDATE_CORRECTION_SUPPORT = """
-    UPDATE receipt_ai.learned_corrections
-    SET corrected_name = $2, support_count = $3, agreement_ratio = $4
-    WHERE correction_id = $1
-"""
-
-_DEACTIVATE_CORRECTION = """
-    UPDATE receipt_ai.learned_corrections
-    SET is_active = FALSE, deactivated_at = CURRENT_TIMESTAMP
-    WHERE correction_id = $1
-"""
-
-_INSERT_CORRECTION = """
-    INSERT INTO receipt_ai.learned_corrections (
-        learning_key, corrected_name, normalized_name, category, support_count, agreement_ratio,
-        scope, refrigerator_id, review_status
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, 'GLOBAL', NULL, 'APPROVED')
-"""
-
-# 승격된 값과 같은 수정은 APPLIED로, 다른 값으로 고쳤던 기존 APPLIED 수정은 다시 후보로 되돌린다.
-_MARK_APPLIED = """
-    UPDATE receipt_ai.receipt_item_feedback
-    SET training_eligibility = CASE
-        WHEN target_normalized_name = $2 AND target_category = $3 THEN 'APPLIED'
-        ELSE 'PERSONAL_APPLIED'
-    END
-    WHERE learning_key = $1 AND training_eligibility IN ('PERSONAL_APPLIED', 'PENDING_REVIEW', 'APPLIED')
-"""
-
-
 class PostgresFeedbackRepository:
-    """분석 결과 이력, 사용자 피드백과 피드백에서 승격한 학습 지식을 PostgreSQL에 저장한다."""
+    """분석 결과 이력, 사용자 피드백과 해당 냉장고의 개인 보정 지식을 PostgreSQL에 저장한다."""
 
     # DB 접속 설정을 받아 저장소를 구성한다. 연결 pool은 최초 사용 시 지연 생성한다.
     def __init__(self, settings: Settings) -> None:
@@ -188,20 +144,17 @@ class PostgresFeedbackRepository:
         rows = await pool.fetch(_FIND_FEEDBACK, analysis_id)
         return self._recorded(analysis_id, rows) if rows else None
 
-    # 피드백 항목을 한 트랜잭션으로 저장하고, 학습 후보가 생긴 키마다 승격 여부를 판단해 반영한다.
+    # 피드백과 해당 냉장고의 개인 보정만 한 트랜잭션으로 저장한다. 전역 승격은 정책 확정 전까지 하지 않는다.
     async def record_feedback(
         self,
         feedback_id: str,
         analysis_id: str,
         request: FeedbackRequest,
         entries: list[FeedbackEntry],
-        min_support: int,
-        min_agreement: float,
-    ) -> tuple[FeedbackRecorded, list[str]]:
+    ) -> FeedbackRecorded:
         import asyncpg
 
         pool = await self._get_pool()
-        promoted: list[str] = []
         try:
             async with pool.acquire() as connection, connection.transaction():
                 # 서비스 계층의 사전 조회만으로는 동시 재전송을 막을 수 없다. 분석 ID 단위로
@@ -209,7 +162,7 @@ class PostgresFeedbackRepository:
                 await connection.execute("SELECT pg_advisory_xact_lock(hashtext($1))", analysis_id)
                 existing_rows = await connection.fetch(_FIND_FEEDBACK, analysis_id)
                 if existing_rows:
-                    return self._recorded(analysis_id, existing_rows), []
+                    return self._recorded(analysis_id, existing_rows)
                 for entry in entries:
                     await connection.execute(
                         _INSERT_FEEDBACK,
@@ -235,23 +188,20 @@ class PostgresFeedbackRepository:
                         if entry.learning_key and entry.training_eligibility == TrainingEligibility.PERSONAL_APPLIED
                     }
                 )
-                # 서로 다른 분석이 같은 키를 동시에 수정해도 개인 지식 삽입과 전역 집계를 직렬화한다.
+                # 서로 다른 분석이 같은 키를 동시에 수정해도 같은 키의 개인 보정 갱신을 직렬화한다.
                 for key in learning_keys:
                     await connection.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
                 for entry in entries:
                     if entry.learning_key and entry.training_eligibility == TrainingEligibility.PERSONAL_APPLIED:
                         await self._upsert_personal(connection, request.refrigerator_id, entry)
-                for key in learning_keys:
-                    if await self._promote(connection, key, min_support, min_agreement):
-                        promoted.append(key)
                 rows = await connection.fetch(_FIND_FEEDBACK, analysis_id)
         except asyncpg.UniqueViolationError:
             # 같은 분석의 피드백이 동시에 두 번 들어와 다른 요청이 먼저 기록한 경우다.
             existing = await self.find_feedback(analysis_id)
             if existing is None:
                 raise
-            return existing, []
-        return self._recorded(analysis_id, rows), promoted
+            return existing
+        return self._recorded(analysis_id, rows)
 
     # 사용자 수정 한 건을 해당 냉장고 전용 보정 지식으로 즉시 저장하거나 최신 값으로 교체한다.
     async def _upsert_personal(self, connection: Any, refrigerator_id: int, entry: FeedbackEntry) -> None:
@@ -273,57 +223,6 @@ class PostgresFeedbackRepository:
             entry.target_normalized_name,
             entry.target_category,
         )
-
-    # 학습 키 하나의 수정 의견을 모아 승격 기준을 넘으면 learned_corrections를 갱신하고 변경 여부를 반환한다.
-    async def _promote(self, connection: Any, key: str, min_support: int, min_agreement: float) -> bool:
-        # 같은 키를 동시에 승격하면 활성 지식이 두 개 생길 수 있으므로 키 단위로 직렬화한다.
-        await connection.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
-        votes = [
-            LearningVote(
-                refrigerator_id=row["refrigerator_id"],
-                target_name=row["target_name"],
-                target_normalized_name=row["target_normalized_name"],
-                target_category=row["target_category"],
-            )
-            for row in await connection.fetch(_LEARNING_VOTES, key)
-        ]
-        decision = decide_promotion(votes, min_support, min_agreement)
-        if decision is None:
-            return False
-
-        current = await connection.fetchrow(_ACTIVE_CORRECTION, key)
-        if current is not None and (current["normalized_name"], current["category"]) == (
-            decision.target_normalized_name,
-            decision.target_category,
-        ):
-            await connection.execute(
-                _UPDATE_CORRECTION_SUPPORT,
-                current["correction_id"],
-                decision.target_name,
-                decision.support_count,
-                decision.agreement_ratio,
-            )
-        else:
-            if current is not None:
-                await connection.execute(_DEACTIVATE_CORRECTION, current["correction_id"])
-            await connection.execute(
-                _INSERT_CORRECTION,
-                key,
-                decision.target_name,
-                decision.target_normalized_name,
-                decision.target_category,
-                decision.support_count,
-                decision.agreement_ratio,
-            )
-            logger.info(
-                "feedback.learning.promoted learning_key_length=%s category=%s support=%s agreement=%.2f",
-                len(key),
-                decision.target_category,
-                decision.support_count,
-                decision.agreement_ratio,
-            )
-        await connection.execute(_MARK_APPLIED, key, decision.target_normalized_name, decision.target_category)
-        return True
 
     # 열려 있는 연결 pool이 있으면 닫는다.
     async def close(self) -> None:

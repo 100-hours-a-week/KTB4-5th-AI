@@ -5,7 +5,7 @@
 이 스키마는 현재 런타임에서 영수증 AI의 **보조 참조 데이터**만 관리한다. 백엔드 MySQL의 `ingredients`가
 사용자 냉장고 재고의 원본이며, PostgreSQL의 `product_knowledge`는 재고나 재료 마스터가
 아니다. 레시피 관련 테이블은 이번 범위에서 제외했다. 분석 큐와 진행 상태는 프로세스 메모리에 두고,
-완료·실패한 분석 결과와 사용자 피드백, 피드백에서 승격한 학습 지식은 이 스키마에 저장한다 — 자세한
+완료·실패한 분석 결과와 사용자 피드백, 냉장고별 개인 보정 지식은 이 스키마에 저장한다 — 자세한
 내용은 [architecture.md](./architecture.md).
 
 `002_receipt_analysis_history.sql`의 `receipt_analyses`는 완료·실패한 분석 결과를 `final_payload`
@@ -38,8 +38,8 @@
 | `015_product_vision_catalog_seed.sql` | (INSERT만) | 다중 실물 상품 실험에서 확인한 상품명 8건과 반복 오인식 별칭 6건 | 시드 데이터 |
 | `016_rename_categories_to_backend_codes.sql` | (제약·UPDATE) | 카테고리 코드를 백엔드 명세와 통일: `GRAIN_NOODLE→GRAINS_NOODLE`, `PROCESSED→PROCESSED_FOOD`, `ETC→OTHER`. 앱 배포 전에 적용 | 스키마·데이터 변경 |
 | `017_shelf_life_rules_leafy_greens_broccoli.sql` | (INSERT만) | 깻잎·브로콜리 냉장 보관 참고 범위(USDA ARS Handbook 66) | 시드 데이터 |
-| `018_feedback_learning.sql` | `receipt_item_feedback`, `learned_corrections` | 사용자 피드백과 피드백에서 승격한 학습 지식. 상품 카탈로그 조회 쿼리가 `learned_corrections`를 읽으므로 **앱 배포 전에 적용** | 스키마 변경 |
-| `019_personal_feedback_learning.sql` | `learned_corrections` 컬럼·인덱스 변경 | 한 번 수정한 값은 해당 냉장고에 즉시 적용하고, 여러 냉장고 합의값은 전역 보정으로 유지 | 스키마 변경 |
+| `018_feedback_learning.sql` | `receipt_item_feedback`, `learned_corrections` | 사용자 피드백과 보정 지식 저장 테이블. 상품 카탈로그 조회 쿼리가 `learned_corrections`를 읽으므로 **앱 배포 전에 적용** | 스키마 변경 |
+| `019_personal_feedback_learning.sql` | `learned_corrections` 컬럼·인덱스 변경 | 한 번 수정한 값은 해당 냉장고에 즉시 적용. 전역 컬럼은 이력 호환을 위해 보존하되 현재 사용하지 않음 | 스키마 변경 |
 
 아래 본문의 실험 기록에 나오는 `PROCESSED` 등 이전 카테고리 코드는 016 적용 전 기록이다.
 
@@ -61,12 +61,13 @@ erDiagram
 
 ## 조회 순서
 
+전역 보정은 정책 확정 전까지 생성·갱신·조회하지 않는다. 기존 GLOBAL 행은 삭제하지 않으며, 이 변경만으로 DB 마이그레이션은 필요하지 않다.
+
 1. 분석 요청에 `refrigeratorId`가 있으면 해당 냉장고의 개인 보정을 조회한다.
-2. 개인 보정이 없으면 여러 냉장고 합의로 승인된 전역 보정을 조회한다.
-3. 정규화한 OCR 문자열로 `product_aliases.normalized_alias`와 `product_knowledge.normalized_name`을 정확히 조회한다.
-4. 정확한 값이 없으면 `pg_trgm` 유사도 조회로 후보만 만든다.
-5. 후보가 확정 기준을 넘지 못하면 해당 행만 Gemma에 전달한다.
-6. 영수증에서 소비기한이 확인되지 않은 경우에만 검수된 `shelf_life_rules`를 조회한다.
+2. 정규화한 OCR 문자열로 `product_aliases.normalized_alias`와 `product_knowledge.normalized_name`을 정확히 조회한다.
+3. 정확한 값이 없으면 `pg_trgm` 유사도 조회로 후보만 만든다.
+4. 후보가 확정 기준을 넘지 못하면 해당 행만 Gemma에 전달한다.
+5. 영수증에서 소비기한이 확인되지 않은 경우에만 검수된 `shelf_life_rules`를 조회한다.
 
 유사도 검색 결과는 자동 확정값이 아니라 모델 입력 후보이다. 임계값은 평가 데이터로 정한 뒤
 애플리케이션 설정에 둔다.

@@ -10,7 +10,7 @@ from app.schemas import Category
 
 logger = logging.getLogger(__name__)
 
-# 사용자 피드백에서 승격한 학습 지식(018 learned_corrections)을 가장 먼저 보고, 그다음 별칭 정확 일치,
+# 해당 냉장고의 개인 보정 지식만 가장 먼저 보고, 그다음 별칭 정확 일치,
 # 표준명 정확 일치 순으로 우선한다(priority 오름차순, LIMIT 1).
 # 바코드 매칭(조회 순서 1번)과 pg_trgm 유사도 매칭(3번)은 지금 파이프라인이 바코드를
 # 추출하지 않고 실제 데이터도 적어 후보 랭킹의 의미가 없어 이번 범위에서 제외했다.
@@ -19,11 +19,6 @@ _LEARNED_LOOKUP_PART = """
            NULL::VARCHAR AS suggested_storage_type, 0 AS priority
     FROM receipt_ai.learned_corrections
     WHERE learning_key = $1 AND scope = 'PERSONAL' AND refrigerator_id = $2 AND is_active
-    UNION ALL
-    SELECT correction_id AS product_id, corrected_name AS canonical_name, category,
-           NULL::VARCHAR AS suggested_storage_type, 1 AS priority
-    FROM receipt_ai.learned_corrections
-    WHERE learning_key = $1 AND scope = 'GLOBAL' AND is_active
     UNION ALL
 """
 
@@ -100,12 +95,12 @@ class PostgresProductCatalogLookup:
     # 정규화 상품명으로 별칭·표준명이 정확히 일치하는 카탈로그 항목을 조회해 반환한다.
     # 결과(없음 포함)는 프로세스 메모리에 캐싱해 동일 문자열 재조회 시 DB를 다시 안 부른다.
     async def find(self, normalized_text: str, refrigerator_id: int | None = None) -> ProductCatalogMatch | None:
-        cache_key = f"{refrigerator_id or 'global'}:{normalized_text}"
+        cache_key = f"{refrigerator_id or 'catalog'}:{normalized_text}"
         return await self._cache.get_or_load(cache_key, lambda: self._query(normalized_text, refrigerator_id))
 
     # 피드백 학습으로 지식이 바뀐 조회 키의 캐시를 비운다.
     def forget(self, normalized_text: str, refrigerator_id: int | None = None) -> None:
-        self._cache.forget(f"{refrigerator_id or 'global'}:{normalized_text}")
+        self._cache.forget(f"{refrigerator_id or 'catalog'}:{normalized_text}")
 
     async def _query(self, normalized_text: str, refrigerator_id: int | None) -> ProductCatalogMatch | None:
         try:
@@ -117,7 +112,7 @@ class PostgresProductCatalogLookup:
                 row = await pool.fetchrow(_FUZZY_LOOKUP_QUERY, normalized_text)
                 matched_via = "fuzzy"
             else:
-                matched_via = "learned" if row.get("priority") in {0, 1} else "exact"
+                matched_via = "learned" if row.get("priority") == 0 else "exact"
         except DependencyUnavailable:
             raise
         except Exception as exc:

@@ -407,9 +407,9 @@ class FeedbackAction(StrEnum):
 
 class TrainingEligibility(StrEnum):
     NOT_ELIGIBLE = "NOT_ELIGIBLE"  # 학습하지 않음(수정 아님, 동의 없음, 학습 대상 필드 변경 없음)
-    PERSONAL_APPLIED = "PERSONAL_APPLIED"  # 해당 냉장고에는 즉시 적용, 전역 승격 의견으로도 집계
+    PERSONAL_APPLIED = "PERSONAL_APPLIED"  # 해당 냉장고의 개인 보정에만 즉시 적용
     PENDING_REVIEW = "PENDING_REVIEW"  # 학습 후보. 다른 사용자의 같은 수정이 쌓이기를 기다림
-    APPLIED = "APPLIED"  # 승격 기준을 넘어 학습 지식에 반영됨
+    APPLIED = "APPLIED"  # 과거 전역 승격 이력 호환용. 신규 피드백에서는 생성하지 않음
     REJECTED = "REJECTED"  # 검수자가 학습에서 제외함
 
 

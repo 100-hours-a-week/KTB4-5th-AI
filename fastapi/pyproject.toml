@@ -21,6 +21,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+retrieval = [
+  "sentence-transformers>=5,<6",
+  "numpy>=2,<3",
+]
 db = [
 ]
 dev = [

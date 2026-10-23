@@ -24,3 +24,5 @@ runpod/training/
 # 파일(51MB, 238,817행). 원본 엑셀(200MB)도 같은 이유로 커밋하지 않는다 — docs/database.md
 # 참고. 나머지 seed_data(마이그레이션이 직접 참조하는 작은 CSV·SQL)는 그대로 커밋한다.
 fastapi/database/seed_data/product_catalog_public_seed.csv
+# 외부 원문·정규화 레시피 준비 데이터는 실행 스크립트로 재생성한다.
+fastapi/database/recipe_staging/

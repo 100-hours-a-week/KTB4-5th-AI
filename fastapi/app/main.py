@@ -16,7 +16,8 @@ from app.errors import AppError
 from app.feedback import FeedbackService
 from app.logging import ApiAuditLogMiddleware, configure_logging, shutdown_logging
 from app.pipeline import ReceiptAnalysisPipeline
-from app.routers import analyses, health, metrics, status
+from app.recipes.service import RecipeService
+from app.routers import analyses, health, metrics, recipes, status
 from app.runtime import AnalysisRuntime
 from app.store import InMemoryAnalysisStore
 
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
     configure_logging(app_settings)
 
     app_runtime = runtime or build_runtime(app_settings)
+    recipe_service = RecipeService(app_settings)
 
     @asynccontextmanager
     # 앱 시작 시 런타임을 시작하고 종료 시 백그라운드 작업과 자원을 정리한다.
@@ -57,6 +59,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
             yield
         finally:
             await app_runtime.stop()
+            await recipe_service.close()
             shutdown_logging()
 
     application = FastAPI(
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
 
     application.state.settings = app_settings
     application.state.runtime = app_runtime
+    application.state.recipes = recipe_service
 
     application.add_middleware(ApiAuditLogMiddleware)
 
@@ -79,6 +83,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
     application.include_router(analyses.router)
     application.include_router(status.router)
     application.include_router(metrics.router)
+    application.include_router(recipes.router)
 
     # 요청 검증 오류는 공통 핸들러가 400 INVALID_REQUEST로 변환하므로 Swagger의 기본 422를 제거한다.
     def build_openapi_schema() -> dict:

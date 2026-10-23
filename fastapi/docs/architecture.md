@@ -18,7 +18,7 @@
   재시작하면 사라진다. 완료·실패한 결과는 메모리에 1시간 두는 것과 별도로 PostgreSQL
   `receipt_analyses`에 90일 저장해, 메모리에서 사라진 뒤에도 GET 조회와 피드백 원본으로 쓴다.
 - PostgreSQL(`receipt_ai` 스키마)은 상품 카탈로그·소비기한 규칙 같은 **보조 참조 데이터**와
-  분석 결과 이력, 사용자 피드백, 피드백에서 승격한 학습 지식을 갖는다 — 자세한 내용은
+  분석 결과 이력, 사용자 피드백, 냉장고별 개인 보정 지식을 갖는다 — 자세한 내용은
   [database.md](./database.md).
 - 이미지 바이너리는 저장하지도 중계하지도 않는다. `objectKey` + `sha256`만 받아 Worker에
   서명 URL로 넘기고, Worker가 내려받아 해시를 검증한다.
@@ -131,16 +131,14 @@ sequenceDiagram
 아니라 사용자 판단이라 학습하지 않는다.
 
 학습 키는 원본 항목의 OCR 원문을 카탈로그 조회와 같은 규칙으로 정규화한 값이다. 한 번 수정한 값은
-`PERSONAL` 지식으로 해당 냉장고에 즉시 적용한다. 같은 키를 서로 다른 냉장고
-`FEEDBACK_PROMOTION_MIN_SUPPORT`(기본 3)곳 이상이 같은 이름·카테고리로 고쳤고, 의견을 낸 냉장고
-중 그 값의 비율이 `FEEDBACK_PROMOTION_MIN_AGREEMENT`(기본 0.8) 이상이면 `GLOBAL` 지식으로 승격한다.
-분석 요청에 `refrigeratorId`가 있으면 개인 → 전역 → 별칭 → 표준명 순서로 조회하고, 없으면 개인 지식을
-건너뛴다. 영수증에서 학습 지식으로 고른 상품은 OCR
-원문 대신 고친 이름을 표시한다. 기존 카탈로그·별칭은 바꾸지 않으므로 잘못 승격된 지식은 `is_active`만 끄면
+`PERSONAL` 지식으로 해당 냉장고에 즉시 적용한다. 전역 보정은 정책 확정 전까지 생성·갱신·조회하지 않는다.
+기존 `GLOBAL` 데이터는 삭제하지 않지만 분석에 사용하지 않는다.
+분석 요청에 `refrigeratorId`가 있으면 개인 → 별칭 → 표준명 순서로 조회하고, 없으면 개인 지식을 건너뛴다. 영수증에서 학습 지식으로 고른 상품은 OCR
+원문 대신 고친 이름을 표시한다. 기존 카탈로그·별칭은 바꾸지 않으므로 잘못 저장된 개인 보정은 `is_active`만 끄면
 된다. 학습은 EC2 PostgreSQL에 쌓이므로 RunPod Worker 교체·마이그레이션과 무관하다.
 
 피드백 응답의 `trainingEligibility=PERSONAL_APPLIED`는 해당 냉장고의 보정 지식에 즉시 반영됐다는
-뜻이고, `APPLIED`는 전역 보정으로도 승격됐다는 뜻이다. 상품명·카테고리만 재사용하며 수량·중량·
+뜻이다. 신규 피드백에서는 `APPLIED`로 전역 승격하지 않는다. 과거 응답 상태는 이력 호환을 위해 유지한다. 상품명·카테고리만 재사용하며 수량·중량·
 소비기한 수정값은 다음 구매에 그대로 적용하지 않는다. Gemma 가중치를 갱신하는 과정은 포함하지 않는다.
 `019_personal_feedback_learning.sql`을 앱 배포 전에 적용한다.
 
@@ -275,6 +273,11 @@ app/
 단일 식재료 시각 분류는 아직 없으므로, 그런 사진은 근거 없이 상품을 임의 생성하지 않는다.
 
 ## 로깅
+
+레시피 추천은 분석 큐·GPU 경로와 독립된 CPU/DB 모듈이다. 백엔드 확정 재고를 입력받아
+캐시와 AI PostgreSQL을 먼저 확인하고, 후보가 없을 때 승인된 외부 공급자를 조회한다.
+백엔드 MySQL에는 직접 쓰지 않으며 변경 조회 API로 스냅샷을 제공한다.
+계약·추천 정책·설정·검증 범위는 [레시피 설계](recipes.md)를 따른다.
 
 `analysisId`/`requestId` 기준으로 `queued → dequeued → remote_inference → document_checked
 → rows.reconstructed → classification → validation → completed/failed → callback` 순서를 추적한다.

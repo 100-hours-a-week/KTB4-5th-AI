@@ -1,6 +1,5 @@
 import logging
 import secrets
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -49,25 +48,6 @@ class FeedbackEntry:
     training_eligibility: TrainingEligibility = TrainingEligibility.NOT_ELIGIBLE
 
 
-@dataclass(frozen=True, slots=True)
-class LearningVote:
-    """같은 학습 키에 대한 한 냉장고의 수정 의견."""
-
-    refrigerator_id: int
-    target_name: str
-    target_normalized_name: str
-    target_category: str
-
-
-@dataclass(frozen=True, slots=True)
-class PromotionDecision:
-    target_name: str
-    target_normalized_name: str
-    target_category: str
-    support_count: int
-    agreement_ratio: float
-
-
 class FeedbackRepository(Protocol):
     # 완료·실패한 분석 결과를 영속 저장소에 남긴다.
     async def save_analysis(self, record: AnalysisRecord) -> None: ...
@@ -78,16 +58,14 @@ class FeedbackRepository(Protocol):
     # 분석에 이미 기록된 피드백이 있으면 반환한다.
     async def find_feedback(self, analysis_id: str) -> FeedbackRecorded | None: ...
 
-    # 피드백을 저장하고 승격 판단을 반영한 결과와 승격된 학습 키 목록을 반환한다.
+    # 피드백을 저장하고 해당 냉장고의 개인 보정만 반영한 결과를 반환한다.
     async def record_feedback(
         self,
         feedback_id: str,
         analysis_id: str,
         request: FeedbackRequest,
         entries: list[FeedbackEntry],
-        min_support: int,
-        min_agreement: float,
-    ) -> tuple[FeedbackRecorded, list[str]]: ...
+    ) -> FeedbackRecorded: ...
 
 
 class LearnedKnowledgeCache(Protocol):
@@ -138,42 +116,8 @@ def evaluate_feedback_item(item: FeedbackItem, original: ReceiptItem | None, con
     return entry
 
 
-# 같은 학습 키에 쌓인 수정 의견을 받아 승격할 값을 반환하고, 기준에 못 미치면 None을 반환한다.
-# 서로 다른 냉장고 min_support곳 이상이 같은 값(정규화 이름·카테고리)으로 고쳤고, 의견을 낸 전체
-# 냉장고 중 그 값의 비율이 min_agreement 이상일 때만 승격한다. 한 냉장고가 여러 번 보내도 한 표다.
-def decide_promotion(votes: Iterable[LearningVote], min_support: int, min_agreement: float) -> PromotionDecision | None:
-    # 저장소가 오래된 순서로 전달한 의견 중 냉장고별 마지막 의견만 사용한다. 같은 냉장고가
-    # 서로 다른 분석에서 값을 다시 고친 경우 과거 값과 최신 값에 동시에 투표하는 것을 막는다.
-    latest_by_refrigerator: dict[int, LearningVote] = {}
-    for vote in votes:
-        latest_by_refrigerator[vote.refrigerator_id] = vote
-
-    supporters: dict[tuple[str, str], set[int]] = {}
-    display_names: dict[tuple[str, str], str] = {}
-    voters: set[int] = set()
-    for vote in latest_by_refrigerator.values():
-        target = (vote.target_normalized_name, vote.target_category)
-        supporters.setdefault(target, set()).add(vote.refrigerator_id)
-        display_names.setdefault(target, vote.target_name)
-        voters.add(vote.refrigerator_id)
-    if not supporters:
-        return None
-    target, fridges = max(supporters.items(), key=lambda item: (len(item[1]), item[0]))
-    support = len(fridges)
-    agreement = support / len(voters)
-    if support < min_support or agreement < min_agreement:
-        return None
-    return PromotionDecision(
-        target_name=display_names[target],
-        target_normalized_name=target[0],
-        target_category=target[1],
-        support_count=support,
-        agreement_ratio=round(agreement, 4),
-    )
-
-
 class FeedbackService:
-    # 메모리 분석 저장소, 영속 저장소, 학습 지식 캐시와 승격 기준 설정으로 서비스를 구성한다.
+    # 메모리 분석 저장소, 영속 저장소, 개인 보정 캐시와 설정으로 서비스를 구성한다.
     def __init__(
         self,
         settings: Settings,
@@ -220,27 +164,22 @@ class FeedbackService:
             for item in request.items
         ]
         feedback_id = f"fbk_{secrets.token_hex(12)}"
-        recorded, promoted_keys = await self._repository.record_feedback(
+        recorded = await self._repository.record_feedback(
             feedback_id,
             analysis_id,
             request,
             entries,
-            self._settings.feedback_promotion_min_support,
-            self._settings.feedback_promotion_min_agreement,
         )
         if self._knowledge_cache is not None:
             personal_keys = {entry.learning_key for entry in entries if entry.learning_key}
             for key in personal_keys:
                 self._knowledge_cache.forget(key, request.refrigerator_id)
-            for key in promoted_keys:
-                self._knowledge_cache.forget(key)
         logger.info(
-            "feedback.recorded analysis_id=%s feedback_id=%s items=%s learning_candidates=%s promoted=%s",
+            "feedback.recorded analysis_id=%s feedback_id=%s items=%s personal_corrections=%s",
             analysis_id,
             feedback_id,
             len(entries),
             sum(entry.training_eligibility != TrainingEligibility.NOT_ELIGIBLE for entry in entries),
-            len(promoted_keys),
         )
         return recorded, True
 

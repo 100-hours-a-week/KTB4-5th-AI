@@ -67,8 +67,8 @@ uv run pytest -q
 | 이미지 | `IMAGE_SOURCE`, `S3_*` | Worker에 넘길 이미지 위치(S3 서명 URL 또는 개발용 기준 URL). 크기·픽셀 제한은 Worker가 검증 |
 | GPU Worker | `REMOTE_INFERENCE_URL` 또는 `RUNPOD_API_KEY`·`RUNPOD_POD_NAME_PREFIX`, `RUNPOD_TEMPLATE_ID`, `RUNPOD_WORKER_PORT`, `REMOTE_INFERENCE_API_KEY`, `REMOTE_INFERENCE_TIMEOUT_SECONDS`, `REMOTE_IMAGE_BASE_URL` | 고정 주소 또는 실행 중인 Worker 자동 탐색, 호출 인증 키·타임아웃 |
 | 버전 기록 | `OLLAMA_MODEL`, `INPUT_CLASSIFIER_VERSION`, `OCR_VERSION` 등 | 응답 `modelTrace`에 기록할 Worker 모델 버전 |
-| DB | `DATABASE_URL`, `DATABASE_POOL_MAX_SIZE`, `REFERENCE_CACHE_MAX_SIZE`, `PRODUCT_CATALOG_CACHE_TTL_SECONDS`, `CATALOG_FUZZY_SIMILARITY_THRESHOLD` | 비우면 카탈로그·소비기한 조회 비활성화. 상품 카탈로그 캐시는 TTL 안에 다른 프로세스의 학습 승격을 다시 읽으며, `asyncpg`는 기본 설치됨 |
-| 피드백 학습 | `FEEDBACK_PROMOTION_MIN_SUPPORT`(3), `FEEDBACK_PROMOTION_MIN_AGREEMENT`(0.8) | 학습 지식 승격 기준. `DATABASE_URL`이 없으면 피드백 API는 503 |
+| DB | `DATABASE_URL`, `DATABASE_POOL_MAX_SIZE`, `REFERENCE_CACHE_MAX_SIZE`, `PRODUCT_CATALOG_CACHE_TTL_SECONDS`, `CATALOG_FUZZY_SIMILARITY_THRESHOLD` | 비우면 카탈로그·소비기한 조회 비활성화. 상품 카탈로그 캐시는 TTL 안에 다른 프로세스의 개인 보정 변경을 다시 읽으며, `asyncpg`는 기본 설치됨 |
+| 피드백 학습 | `DATABASE_URL` | 해당 냉장고 개인 보정만 즉시 적용. 전역 보정은 정책 확정 전까지 사용하지 않으며, DB 설정이 없으면 피드백 API는 503 |
 | 콜백 | `CALLBACK_URL`, `CALLBACK_API_KEY`, `CALLBACK_TIMEOUT_SECONDS`, `CALLBACK_MAX_ATTEMPTS` | 운영에서는 URL·인증 키 필수. 로컬에서만 비우고 GET으로 확인 가능 |
 
 ## 원격 GPU Worker
