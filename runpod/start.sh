@@ -33,11 +33,39 @@ export OLLAMA_MODELS="${OLLAMA_MODELS:-/app/.ollama/models}"
 # Colab이 주입하는 Jupyter 전용 matplotlib backend는 격리된 Worker venv에서
 # import할 수 없다. Worker는 그래프 UI가 필요 없으므로 headless backend를 쓴다.
 export MPLBACKEND="${WORKER_MPLBACKEND:-Agg}"
-if ! mkdir -p "$OLLAMA_MODELS" 2>/dev/null; then
-    echo "Ollama 모델 경로를 쓸 수 없어 컨테이너 경로로 대체합니다: $OLLAMA_MODELS" >&2
-    export OLLAMA_MODELS="$project_dir/.ollama/models"
-    mkdir -p "$OLLAMA_MODELS"
-fi
+
+# 마이그레이션 중 볼륨 경로는 존재해도 하위 저장소에 접근하지 못할 수 있다.
+# 실제 쓰기를 검증하고 제한 시간만 대기한다. 실패해도 다른 경로에 모델을 다시 받지 않는다.
+prepare_model_storage() {
+    local wait_seconds="${OLLAMA_STORAGE_WAIT_SECONDS:-180}"
+    local deadline probe directory
+    case "$wait_seconds" in
+        ''|*[!0-9]*) echo "OLLAMA_STORAGE_WAIT_SECONDS는 0 이상의 정수여야 합니다." >&2; return 1 ;;
+    esac
+    deadline=$((SECONDS + wait_seconds))
+    while true; do
+        local writable=true
+        for directory in "$OLLAMA_MODELS" "$OLLAMA_MODELS/blobs" "$OLLAMA_MODELS/manifests"; do
+            if ! mkdir -p "$directory" 2>/dev/null || ! probe="$(mktemp "$directory/.dameokja-write-probe.XXXXXX" 2>/dev/null)"; then
+                writable=false
+                break
+            fi
+            if ! rm -- "$probe"; then
+                echo "모델 저장소 검증 파일 정리에 실패했습니다: $probe" >&2
+                return 1
+            fi
+        done
+        if [[ "$writable" == "true" ]]; then
+            return 0
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "Ollama 모델 저장소 접근 시간 초과: $OLLAMA_MODELS (볼륨·권한을 확인하세요)" >&2
+            return 1
+        fi
+        echo "Ollama 모델 저장소 접근 대기: $OLLAMA_MODELS" >&2
+        sleep 5
+    done
+}
 
 bundled_input_classifier="$project_dir/models/input-type-mobilenetv3-small.onnx"
 runtime_input_classifier="${INPUT_CLASSIFIER_MODEL_PATH:-$bundled_input_classifier}"
@@ -133,6 +161,7 @@ trap request_restart HUP
 trap request_stop USR1
 
 start_children() {
+    prepare_model_storage || return 1
     ollama serve &
     ollama_pid=$!
 
