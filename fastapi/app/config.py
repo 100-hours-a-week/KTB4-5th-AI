@@ -1,7 +1,8 @@
+import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -58,6 +59,19 @@ class Settings(BaseSettings):
     recipe_food_safety_storage_approved: bool = False
     recipe_tavily_api_key: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("TAVILY_API_KEY", "RECIPE_TAVILY_API_KEY", "recipe_tavily_api_key"))
     recipe_tavily_max_attempts: int = Field(default=1, ge=1, le=2)
+    recipe_tavily_approved_domains: list[str] = Field(default_factory=list, max_length=20)
+
+    # 프로토콜·경로·와일드카드·내부 주소를 승인 호스트에 섞지 못하게 한다.
+    @field_validator("recipe_tavily_approved_domains")
+    @classmethod
+    def validate_recipe_domains(cls, domains: list[str]) -> list[str]:
+        result = set()
+        for domain in domains:
+            host = domain.strip().lower()
+            if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", host) or host.endswith((".local", ".internal", ".localhost")):
+                raise ValueError("승인된 공개 호스트 이름만 허용합니다.")
+            result.add(host)
+        return sorted(result)
     database_pool_max_size: int = Field(default=5, ge=1, le=50)
     reference_cache_max_size: int = Field(default=2000, ge=1, le=100_000)
     # 여러 FastAPI 프로세스 중 한 곳에서 개인 보정이 갱신돼도 다른 프로세스가 이 시간 안에

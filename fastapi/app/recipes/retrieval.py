@@ -22,6 +22,8 @@ INGREDIENT_FAMILIES = {
     "요거트": {"요거트", "플레인요거트", "그릭요거트"},
     "시래기": {"시래기", "무청시래기", "무청시래기(삶은것)"},
     "버섯": {"버섯", "표고버섯", "팽이버섯", "느타리버섯", "새송이버섯", "양송이버섯", "송이버섯"},
+    "김치": {"김치", "배추김치", "포기김치"},
+    "마늘": {"마늘", "통마늘", "다진마늘", "마늘다진것"},
 }
 FAMILY_BY_NAME = {normalize(name): family for family, names in INGREDIENT_FAMILIES.items() for name in names}
 
@@ -75,6 +77,10 @@ def query_variants(names: list[str]) -> list[str]:
 # 원문·별칭의 부분 문자열을 함께 검사한다. 계란 제외가 달걀노른자를 놓치지 않도록 한다.
 def is_excluded(name: str, excluded: list[str]) -> bool:
     exclusions = variants([value for value in excluded if normalize(value)])
+    for value in excluded:
+        family = ingredient_family(value)
+        if family and canonical(value) == canonical(family):
+            exclusions.extend(normalize(member) for member in INGREDIENT_FAMILIES[family])
     return any(exclusion in candidate for candidate in {normalize(name), canonical(name)} for exclusion in exclusions)
 
 

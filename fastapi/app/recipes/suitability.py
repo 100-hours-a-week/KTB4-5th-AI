@@ -11,6 +11,7 @@ SEASONING_NAMES = {
     "맛술", "청주", "참기름", "들기름", "식용유", "식물성기름", "올리브유", "올리브오일", "발사믹식초", "고춧가루", "고추가루", "통깨", "깨", "깨소금",
     "다진마늘", "마늘다진것", "마늘", "생강", "다진생강", "꿀", "올리고당", "물엿", "알룰로스", "아가베시럽", "레몬즙", "굴소스", "케첩", "마요네즈",
     "피클링스파이스", "라임즙", "생강가루", "파슬리가루", "계피가루", "유자청", "매실액", "월계수잎", "통후추", "저염된장", "볶은소금", "포도씨유",
+    "통마늘",
 }
 # 제목에 명시되면 MAIN이 우선한다. 양파가 원문에 있으면 적은 양이어도 임의 삭제하지 않는다.
 SIDE_NAMES = {"양파", "적양파", "당근", "대파", "쪽파", "청양고추", "홍고추", "풋고추", "고추", "피망", "파프리카", "깻잎", "파슬리", "부추",
@@ -21,6 +22,7 @@ MAIN_NAMES = {
     "사과", "배", "딸기", "바나나", "과일", "연어", "참치", "고등어", "대구", "명태", "홍합", "조개", "굴", "전복", "게", "소고기", "돼지고기", "닭고기", "오징어", "새우",
     "적양배추", "단호박", "밀가루", "강력분", "중력분", "박력분", "식빵", "쌀가루", "멥쌀", "한천", "호두", "아몬드", "포도", "생크림", "버터",
     "양상추", "블루베리", "메추리알", "홍시", "찹쌀", "들깨가루", "미역줄기", "햄", "베이컨", "소시지", "돈육", "통조림햄",
+    "미역", "마른미역", "불린쌀", "볶음밥쌀", "문어", "주꾸미", "낙지", "가지", "호박", "스파게티", "파스타", "파스타면", "국수", "소면", "당면", "만두피",
 }
 # 원문의 괄호·수식어 속에 명시된 핵심 식재료도 부재 여부를 검증한다. 보유 매칭을 확장하지 않는다.
 MAIN_COMPONENTS = {name for name in MAIN_NAMES if len(name) >= 2} | {"새우", "우삼겹", "닭가슴살", "닭다리살"}
@@ -69,6 +71,6 @@ def assess_suitability(row: dict, stock_names: list[str]) -> dict:
     used_names = {canonical(name) for name in row["usesInventory"]}
     used_food = any(canonical(item["name"]) in used_names and item["role"] not in {"WATER", "SEASONING"} for item in facts)
     # 관련 계열뿐이거나 주재료 분량이 부족한 후보는 완전 보유·단위 확인 후보보다 뒤로 보낸다.
-    tier = 3 if related_main or main_shortage else 2 if missing else 0 if row["quantityStatus"] == "SUFFICIENT" else 1
+    tier = 3 if related_main or unresolved or main_shortage else 2 if missing else 0 if row["quantityStatus"] == "SUFFICIENT" else 1
     return {"ingredients": facts, "missingMain": missing_main, "unresolvedMissing": unresolved, "relatedMain": related_main,
-            "hasFoodMatch": used_food or bool(related_main), "tier": tier}
+            "hasFoodMatch": used_food, "hasRelatedFood": bool(related_main), "tier": tier}

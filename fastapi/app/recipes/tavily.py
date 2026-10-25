@@ -23,6 +23,7 @@ class DiscoveryHit(BaseModel):
     url: str = Field(min_length=1, max_length=4096)
     searchScore: float | None = Field(default=None, ge=0, le=1)
     status: Literal["PENDING_SOURCE_AND_USAGE_REVIEW"] = "PENDING_SOURCE_AND_USAGE_REVIEW"
+    rawContent: str | None = Field(default=None, max_length=200000, repr=False)
 
     # 외부 공개 HTTP(S) 주소만 후보로 보존한다. 주소를 가져오거나 권한을 승인하지 않는다.
     @field_validator("url")
@@ -52,13 +53,15 @@ class TavilyDiscovery:
         self._last_request_at = 0.0
 
     # 레시피/공급자 검색 결과의 URL·제목만 반환한다. 원문·이미지를 수집하거나 Recipe로 승격하지 않는다.
-    async def search(self, query: str, max_results: int = 5) -> list[DiscoveryHit]:
+    async def search(self, query: str, max_results: int = 5, approved_domains: list[str] | None = None) -> list[DiscoveryHit]:
         if not self.settings.recipe_tavily_api_key:
             raise DependencyUnavailable("TAVILY_API_KEY가 설정되지 않았습니다.")
         if not query.strip() or len(query) > 1000 or not 1 <= max_results <= 10:
             raise ValueError("검색어 길이는 1~1000, 결과 수는 1~10이어야 합니다.")
         payload = {"query": query, "search_depth": "basic", "max_results": max_results, "include_answer": False,
                    "include_raw_content": False, "include_images": False, "auto_parameters": False, "include_usage": True}
+        if approved_domains:
+            payload.update(include_domains=approved_domains, include_raw_content=True)
         try:
             async with asyncio.timeout(20), self._lock:
                 await asyncio.sleep(max(0, 1 - (time.monotonic() - self._last_request_at)))
@@ -89,7 +92,8 @@ class TavilyDiscovery:
                 if not isinstance(row, dict):
                     continue
                 try:
-                    hit = DiscoveryHit(title=row.get("title"), url=row.get("url"), searchScore=row.get("score"))
+                    hit = DiscoveryHit(title=row.get("title"), url=row.get("url"), searchScore=row.get("score"),
+                                       rawContent=row.get("raw_content") if approved_domains else None)
                 except ValueError:
                     continue
                 if hit.url not in seen:

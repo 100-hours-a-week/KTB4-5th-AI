@@ -1,117 +1,124 @@
-# 냉장고 레시피 추천 — 임박 재료 우선·단일 AI 순위 조정 정책 v6
+# 냉장고 레시피 추천 — 조리 가능성 분리·임박 주재료·웹 보충 정책 v7
 
-## 목적과 흐름
+## 목적
 
-검증된 원천 레시피를 재고와 비교해 기본 추천을 먼저 만든다. AI는 후보를 생성·제거하지 않고 임박 재료 활용·구매 부담·조리 수고를 고려해 순서만 조정한다. 날짜·분량·제외 조건은 코드가 검증한다.
+추천 개수보다 실제 재고로 만들 만한 요리를 우선한다. 일반 추천과 종류·역할 확인 후보를 분리하며 검증된 결과가 적으면 그만큼만 반환한다. 원문 재료·분량·조리 단계는 변경하지 않고, 모델은 검증된 후보의 순서만 조정한다.
+
+## 처리 흐름
 
 ```mermaid
 flowchart TD
-    BE[확정 재고·인분·전략] --> V[인증·fingerprint·제외·기한 검증]
-    V --> C{결과 캐시}
-    C -- hit --> OUT[최대 limit개 반환]
-    C -- miss --> DB[PostgreSQL 원천 검색<br/>전체 유효 재료·1회]
-    DB -- 후보 없음 --> SOURCE[승인·활성 식품안전나라]
-    SOURCE --> Q[원천·제외 검증<br/>재료 역할·주재료 보유·분량 검증]
-    DB -- 후보 있음 --> Q
-    Q --> FILL{필터 후 후보 부족 또는 임박 활용 없음}
-    FILL -- 승인·키 설정됨 --> MORE[임박 순 최대 3재료 외부 보충 1회]
-    MORE --> NEED{AI 활성·후보 2개 이상}
-    FILL -- 충분하거나 외부 미설정 --> NEED
-    NEED -- 아니오 --> BASE[기본 추천 유지]
-    NEED -- 예 --> A[Worker Gemma RANK 1회<br/>전체 후보 ID 순열만 반환]
-    A --> CHECK[누락·중복·없는 ID 거부<br/>임박 우선·적합성 그룹 보존]
-    A -- 장애·잘못된 출력 --> BASE
-    CHECK --> OUT
-    BASE --> OUT
+    INPUT[확정 냉장·냉동 재고·인분·전략] --> VALID[인증·fingerprint·제외·기한 검증]
+    VALID --> CACHE{추천 캐시}
+    CACHE -- hit --> OUT[일반 추천·확인 후보·미활용 임박 재료]
+    CACHE -- miss --> DB[AI PostgreSQL ACTIVE 원천 조회 1회]
+    DB --> CHECK[재료 역할·정확 보유·분량 판정]
+    CHECK --> GAP{활용 못한 임박 주재료 또는 일반 후보 없음}
+    GAP -- 없음 --> RANK[일반 후보만 Gemma RANK 최대 1회]
+    GAP -- 있음 --> FS[키·원문 저장 승인 시 식품안전나라 보충 1회]
+    FS --> AGAIN{여전히 미활용 임박 재료 또는 일반 후보 없음}
+    AGAIN -- 있음 --> WEB[Tavily 승인 호스트 검색 최대 2회]
+    WEB --> PARSE[명시적 원문 재료·조리 구획 파싱]
+    PARSE --> RECHECK[동일 제외·역할·보유·분량 재검증]
+    RECHECK --> RANK
+    AGAIN -- 없음 --> RANK
+    RANK --> GUARD[전체 ID 순열·임박 주재료·적합성 그룹 검증]
+    GUARD --> OUT
 ```
 
-첫 PLAN 호출과 초점 재료 재검색은 하지 않는다. 캐시 미스에서 DB 검색은 1회, AI 호출은 최대 1회다. AI 실패가 기본 후보나 추천 개수를 없애지 않는다.
+DB 검색·후보 검증은 CPU FastAPI가, RANK는 기존 GPU Worker의 Gemma가 담당한다. 첫 PLAN·SELECT 호출, 임의 URL 실행, LLM 조리법 생성은 하지 않는다.
 
-## Tavily·외부 조회의 실제 범위
+## 일반 추천과 확인 후보
 
-- 사용자 추천 API는 Tavily·TheMealDB를 자동 호출하지 않는다.
-- DB 후보가 없거나, 필터 후 limit 미만이거나, 임박 재고가 있는데 실제 활용 후보가 없으면 식품안전나라로 한 번 보충한다. 이미 최초 원천 검색을 했다면 반복하지 않는다. 보충 검색은 소비기한 ASC·동일 날짜 재고 ID ASC로 최대 세 가지 다른 재료를 조회한다. 키와 원문 저장 승인이 모두 필요하며 임의로 활성화하지 않는다.
-- 기존 후보가 있는 보충 검색에서 외부 장애가 나면 후보를 유지하고 경고하며 해당 결과는 캐싱하지 않는다. 외부가 미설정이면 기존 후보와 미설정 경고를 반환한다. 최초 DB 후보가 전혀 없을 때의 미설정 503 계약은 유지한다.
-- 공급자 미설정 시 기존 503 의존성 오류 계약을 유지한다.
-- TavilyDiscovery와 database/discover_recipe_sources.py는 별도의 원천 조사 도구다. 제목·URL만 검토 대기 후보로 수집하며 원문·이미지를 크롤링하거나 DB Recipe로 자동 승격하지 않는다.
-- 따라서 검색 키가 있다는 사실과 사용자 요청에서 검색한다는 것은 다르다. Tavily 자동 폴백은 원문 이용·반입 정책과 응답 계약을 정한 뒤 연결할 후속 범위다.
+- recommendations: 정확히 보유한 식품이 연결되고, 명확히 없는 주재료나 역할 미검토 누락·계열 확인이 없는 후보다.
+- confirmationCandidates: 같은 계열의 종류·부위 확인 또는 미검토 누락 재료가 남은 후보다. 최대 3개이며 일반 추천과 별도로 표시한다. 필수 재료가 확실히 없는 후보는 여기에도 넣지 않는다.
+- 정확한 식품 연결 0개인 후보는 일반 추천에 넣지 않는다. 계열 힌트만 있는 후보는 확인 목록에서만 제공한다.
+- UNKNOWN을 양념으로 가정하지 않는다. 스파게티·미역·문어·주꾸미·가지·호박 등 확인된 핵심 식품 이름을 MAIN 규칙에 포함한다. 검토 목록은 모든 식품의 의미를 완벽히 판별하는 분류기가 아니다.
+- 일반 추천의 feasibility는 QUANTITY_VERIFIED / NEEDS_CHECK / NEEDS_SHOPPING이다. 확인 후보는 NEEDS_CHECK이며 confirmationReasons에 확인 이유를 제공한다.
+- confirmationReasons는 원문 인분 부재·재료 종류·상태·역할 확인을 설명한다. 인분 미상이라고 기본 1인분이나 2인분을 넣지 않는다.
+- recommendationEngine=EMPTY는 일반 추천이 없다는 뜻이다. confirmationCandidates가 남아 있을 수 있다.
+- 실제 수량·중량 계산은 동일 이름·검토된 별칭과 같은 EA/G/ML끼리만 수행한다. 두부↔순두부·버섯 종류·고기 부위를 대체나 수량 충족으로 확정하지 않는다.
+- 물은 기본 가용이지만 양은 미확인이다. 조미료는 pantryIngredientNames에 명시한 검토된 양념만 참고한다. 해당 요리에서 MAIN이 되는 마늘 등을 팬트리로 우회 공급하지 않는다.
+- 제외 재료는 부분 문자열·명시 별칭으로 검사한다. 닭고기·소고기 같은 포괄 이름은 검토된 부위에도 적용한다. 특정 버섯만 제외한 것을 모든 버섯 제외로 확대하지 않는다. 이 처리는 알레르기 안전 보증이 아니다.
 
-## 기본 적합성·AI 역할
+## 임박 활용과 순위
 
-- ACTIVE 원문, 정확 보유 재료 또는 검토된 계열 확인 후보와의 연결, 제외 조건을 통과한 후보만 사용한다. 계열 연결만 있으면 사용으로 표시하지 않는다. 제외 부분 문자열 검사는 알레르기 안전 보증이 아니다.
-- 점수에는 임박 재료 활용·보유 재료 비율·부족 재료·제목 명시 누락 재료가 반영되지만, 점수가 0이라는 이유만으로 적합 후보를 제거하지 않는다. 보유 주재료가 있고 양념·부재료만 부족한 요리를 감점 때문에 놓치지 않기 위해서다. 원천 ID 중복을 제거한다.
-- `suitability.py`는 재료 역할을 MAIN/SIDE/SEASONING/WATER/UNKNOWN으로 구분한다. 제목 근거가 우선하며, 그 외는 코드의 명시적 검토 목록만 사용한다. UNKNOWN을 자동으로 양념이나 부재료로 취급하지 않는다. 역할은 내부 판단 자료로만 쓰며 원문 스냅샷에 새 필드를 저장하지 않는다.
-- 주재료가 정확히 없고 같은 계열 재고도 없으면 제외한다. 수식어가 붙은 원문 안의 명시적인 고기·치즈 등도 검토된 구성어로 검증한다. UNKNOWN 누락은 제외 대신 원문·부족 목록·확인 사유를 보존한다. 양념으로 추측하거나 생략해도 된다고 안내하지 않는다. 물·양념만의 교집합으로 요리를 추천하지 않는다.
-- USE_EXPIRING이 포함되면 실제 임박 재료 포함 여부 → 그중 가장 빠른 소비기한 → 활용 임박 재료 종류 수 내림차순을 먼저 적용한다. 그 다음 적합성 그룹, 구매 부담, 점수를 비교한다. AI도 이 우선순위를 뒤집지 못하며 같은 우선순위 그룹에서만 조정한다. USE_EXPIRING이 없는 요청에는 이 날짜 우선순위를 적용하지 않는다.
-- 적합성 그룹은 0=정확한 재료·수치 충족, 1=재료 보유·분량 확인 필요, 2=추가 재료 필요, 3=주재료 분량 부족 또는 같은 계열만 있어 확인 필요다. 역할 미검토 이름이 핵심 재료일 가능성은 남으므로 모든 원문 재료와 확인 사유를 보여줘야 한다.
-- 검색은 검토된 계열 이름으로 확장한다. 버섯↔팽이·표고 등은 확인 후보를 찾는 용도이며 실제 사용·임박 활용·수량 배분은 정확한 이름 매칭만 인정한다. 계열 확인 후보만으로 USE_EXPIRING 조건을 충족시키지 않는다.
-- 제목 연결은 통오징어→오징어와 쇠고기안심→소고기 등 검토된 관계만 사용한다. 같은 계열은 대체·정확 보유·조리 상태·분량 환산의 증거가 아니다. 소고기가 있어도 쇠고기안심의 배분량은 늘리지 않으며 부족 재료와 확인 필요 사유를 그대로 표시한다.
-- essentialIngredientNos는 제목 및 검토 규칙으로 MAIN인 원문 재료 번호다. missingEssentialIngredientNos는 그중 정확 보유가 확인되지 않은 번호다. 모든 요리의 주재료를 완전하게 식별했다는 보장은 아니다.
-- USE_EXPIRING만 요청하면 실제 임박 재료를 쓰는 후보만 남긴다. 복수 전략은 임박 활용·구매 최소·간편 조리를 순위 판단 입력으로 사용한다. 모든 전략이 반드시 한 개씩 나오는 것은 아니다.
-- SIMPLE_COOKING만 요청하면 적합성 그룹이 같은 경우 원문 단계 수가 적은 후보를 먼저 표시한다. 단계 수가 실제 조리시간을 보증하지 않는다.
-- 물을 제외한 보유하지 않은 원문 재료가 있거나 분량이 부족하면 NEEDS_SHOPPING이다. 같은 계열 재고가 있어도 정확한 재료가 없으면 구매·확인 필요를 유지한다. 수치상 충족만 QUANTITY_VERIFIED이며, 해동·기구·식품 안전 보증은 아니다.
-- RANK는 최대 후보 상한(기본 12개)의 candidateId 전체를 정확히 한 번씩 반환한다. 프롬프트가 아니라 Worker JSON Schema와 서버의 순열 검증을 모두 적용한다.
-- AI는 새 요리·재료·날짜·분량·조리 시간을 만들거나 원문을 수정하지 않는다. 표시 reason은 검증된 사실로만 구성한다.
+USE_EXPIRING 전략이 있으면 다음을 코드가 보호한다.
 
-AI 입력은 재고·전략·임박 정책과 압축 후보다. 원문 재료별 분량 판정과 보유·부족·임박·제목 명시 누락 정보를 전달한다. 조리문은 첫 2단계·단계당 100자로 제한하고 생략 여부를 표시한다. 24,000바이트 초과 시 세부 수치·조리문부터 줄인다. 그래도 초과하면 후보를 잘라 없애지 않고 기본 추천으로 폴백한다. 최종 ingredients/steps/baseServings/sourceRevision은 그대로 반환한다.
+1. 정확히 연결된 임박 MAIN 재료를 쓰는 요리.
+2. 임박 SIDE 등만 쓰는 요리.
+3. 임박 활용이 없는 요리.
 
-## 분량과 재고
+같은 그룹 안에서는 적합성 그룹 → 추가로 확인·구매할 재료 수 → 가장 빠른 기한 → 임박 MAIN 종류 수를 비교한다. 이어 기본 점수·원천 ID로 결정한다. SIMPLE_COOKING만 요청하면 동일 적합성에서 원문 단계 수를 비교한다. 단계 수를 조리시간으로 단정하지 않는다.
 
-- 정확 이름·검토된 재고 별칭과 같은 EA/G/ML끼리만 계산한다. 1모→g, 큰술→ml, g→ml을 추측하지 않는다.
-- 원문 인분·수치가 없으면 UNKNOWN_AMOUNT/null을 유지한다. 원문 분량을 임의로 1인분으로 간주하지 않는다.
-- 같은 재료의 중복 행을 각각 계산하며 소비기한이 가까운 재고 ID부터 가상 배분한다.
-- ingredientRequirements는 원문·필요량·배분·부족량, inventoryUsage는 available/used/remaining이다.
-- 각 추천을 단독 선택하는 독립 대안이며 실제 차감이나 여러 요리 동시 조리 계획이 아니다.
-- 물은 기본 가용 정책으로 구매 필요에서 제외하며 냉장고 재고로 임박 가산하지 않는다. 물의 보유량은 보증하지 않으므로 분량은 PANTRY_UNVERIFIED이며 그 때문에 QUANTITY_VERIFIED로 승격하지 않는다. 원문 물 분량은 보존한다. 육수·소금물·물전분·우유를 물로 취급하지 않는다.
-- 조미료는 냉장고와 별도인 pantryIngredientNames로 명시한 검토된 SEASONING만 보유로 참고한다. 분량은 PANTRY_UNVERIFIED다. 소고기 등 주재료를 pantry에 넣어 보유 검증을 우회할 수 없고, 미검토 이름은 무시하고 경고한다. 원문 양념 분량·전체 조리문은 삭제하지 않는다.
+usesExpiringIngredients는 모든 정확 매칭 임박 이름, usesExpiringMainIngredients는 그중 현행 MAIN 판정 이름이다. 이름 포함은 실제 소비량 검증과 다르다. 실제 사용량은 ingredientRequirements / inventoryUsage의 계산 결과와 함께 읽는다.
 
-## API·운영 계약
+USE_EXPIRING만 요청하면 정확 매칭 임박 재료를 쓰는 후보만 남긴다. 순두부·두부 같은 계열 확인만으로 임박 활용을 달성했다고 표시하지 않는다.
 
-POST /ai/v1/recipe-recommendations의 인증과 요청·응답 필드 형태는 유지한다.
+AI는 후보 전체 ID의 순열만 반환한다. 날짜·원문·재료·분량·후보를 추가·제거하지 않는다. 후보가 하나면 호출하지 않고, 잘못된 순열·모델·프로토콜·시간 초과는 기본 추천을 유지한다.
 
-- limit 기본 10, 범위 1~20. 검증된 기본 후보가 부족하면 그 미만을 반환한다.
-- recommendationEngine=AI는 AI 순위 조정이 검증됐다는 뜻이다. AI가 레시피를 생성하거나 섭취 안전을 승인했다는 의미가 아니다.
-- RULE_FALLBACK은 AI 비활성·생략·실패 시 기본 추천임을 표시한다. 후보 1개에서는 불필요한 모델 호출을 하지 않는다.
-- EMPTY는 유효 재고·기본 적합 후보가 없음을 뜻한다.
-- mealPlan은 이전 응답 호환을 위해 빈 focusIngredientIds/ideas로 유지한다. 별도 AI 계획은 만들지 않는다.
-- trace.policyVersion=recipe-rerank-v6, promptVersion=recipe-grounded-v2, aiCalls=0 또는 1, searchCount는 DB 조회 횟수 0 또는 1이다. 외부 보충 횟수는 포함하지 않는다. candidateCount는 원천 보충을 포함한 역할 필터 전의 중복 제거·제외 검증 통과 수다. 실제 추천 수와 다르다.
-- score/scoreBreakdown은 코드의 후보 점수이지 AI 신뢰도나 최종 순위 점수가 아니다.
-- AI 대상보다 limit가 크면 AI가 정렬한 후보 뒤에 검증된 기본 후보를 유지하며 AI_RANKED_PREFIX_ONLY로 범위를 명시한다.
-- 기존 Worker 주소 탐색과 X-Worker-API-Key 인증으로 POST /internal/v1/recipes/reason stage=RANK를 호출한다. Worker의 PLAN/SELECT 수용은 배포 전환 호환용이며 현 추천 경로는 사용하지 않는다.
-- 미지원 구버전 Worker는 기본 추천으로 폴백한다. 새 동작의 실측은 FastAPI와 Worker를 함께 배포한 뒤 수행해야 한다.
-- RECIPE_AI_ENABLED=true, RECIPE_AI_TIMEOUT_SECONDS=45초, RECIPE_AI_MAX_CANDIDATES=12가 기본이다.
-- AI 슬롯은 FastAPI 2개, Worker는 사진 분석과 같은 inference/LLM 슬롯을 사용한다. 경합이 없다고 보장하지 않는다.
-- 시간 예산은 순위 호출의 슬롯 대기를 포함한다. DB·외부 조회까지 포함한 전체 API SLA는 아니다. HTTP 취소가 GPU 커널을 즉시 중단한다는 보장도 없다.
-- AI 실패 폴백은 캐싱하지 않으며 의도적인 단일 후보·AI 비활성 결과는 캐싱할 수 있다. 캐시에는 정책·제목 매칭 버전·모델·재고·제외·전략·인분·limit·양념·서울 날짜 등을 포함한다.
-- 기존 LLM 토큰·시간 지표에 RANK 호출도 합산한다. 사진/레시피 토큰이 집계 지표에서 따로 분리되지는 않는다.
-- 원천 동기화·사용자 재고·피드백 정책은 변경하지 않는다. 새 SQL은 없다.
+## 임박 재료별 검색 보충
 
-### 경고
+단순히 추천이 limit 미만이라는 이유로 외부 조회하지 않는다. 일반 후보의 임박 MAIN 활용 이름을 집계해 아직 활용되지 않은 임박 재료를 기한 ASC·동일 날짜 재고 ID ASC로 찾는다. 대파를 쓰는 요리가 있다는 이유로 두부·버섯 보충을 생략하지 않는다.
 
-| 값 | 의미 |
-| --- | --- |
-| AI_DISABLED | AI 설정이 꺼져 기본 추천을 반환 |
-| AI_NOT_NEEDED_SINGLE_CANDIDATE | 후보가 하나라 순위 조정을 생략 |
-| AI_UNAVAILABLE_OR_INVALID | 시간 초과·원격 오류·없는 ID·누락·중복·스키마 오류 |
-| RULE_RESULTS_NOT_AI_JUDGEMENT | 반환 순서는 기본 규칙 결과 |
-| NO_ELIGIBLE_RECIPES | 조회 후보가 있어도 기본 적합 조건을 통과하지 못함 |
-| CANDIDATE_COUNT_BELOW_REQUEST_LIMIT | 검증된 기본 후보 수가 요청 수보다 적음 |
-| MISSING_MAIN_INGREDIENT_RECIPES_EXCLUDED | 미보유 주재료가 있는 후보를 제외 |
-| UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK | 미검토 누락 재료가 있어 원문 역할·보유 여부 확인 필요 |
-| EXTERNAL_REPLENISHMENT_NOT_CONFIGURED | 후보 보충이 필요하지만 키 또는 원문 저장 승인이 미설정 |
-| EXTERNAL_REPLENISHMENT_UNAVAILABLE | 외부 보충 장애로 기존 기본 후보를 유지 |
-| UNREVIEWED_PANTRY_INGREDIENTS_IGNORED | 물·검토된 양념 외의 팬트리 이름은 보유 증거로 사용하지 않음 |
-| AI_ORDER_CONSTRAINED_BY_ELIGIBILITY | AI 순서가 임박 우선 또는 적합성 그룹을 뒤집어 서버가 보정 |
-| AI_RANKED_PREFIX_ONLY | 일부 후보만 AI로 정렬하고 나머지는 기본 순서를 보존 |
-| PARTIAL_STRATEGY_COVERAGE | 요청 전략이 모두 표시되지는 않음 |
-| EXPIRED_INVENTORY_INCLUDED_NOT_SAFETY_APPROVAL | 기한 경과 포함 모드이며 섭취 안전 승인이 아님 |
+- 식품안전나라: 기존 키와 원문 저장 승인이 있을 때 한 번 보충한다. 사용 가능한 원천을 저장·재검증한다.
+- Tavily: 구조화 원천 보충 뒤에도 미활용 임박 재료가 남거나 일반 후보가 없을 때 마지막으로 실행한다. 초점 재료 최대 2개에 대해 검색당 결과 최대 5개다.
+- Tavily 검색어는 재료명과 조리법 검색 문구뿐이다. 사용자·냉장고 ID, 이미지 URL, 보유량은 전달하지 않는다.
+- TAVILY_API_KEY와 RECIPE_TAVILY_APPROVED_DOMAINS가 모두 필요하다. 후자는 본문 저장·가공·서비스 제공 조건을 확인한 정확한 호스트의 JSON 배열이며 기본값은 []이다. 하위 도메인·와일드카드를 자동 승인하지 않는다.
+- 검색 API의 include_domains와 include_raw_content를 사용한다. 응답 URL의 호스트도 다시 확인한다. 앱이 검색 URL을 직접 요청하거나 리다이렉트를 따라가지 않는다.
+- 본문의 단일 schema.org Recipe 또는 명시적인 Markdown 재료·조리 구획만 파싱한다. 요약·불완전 분량·모호한 구획·여러 요리가 섞인 자료는 Recipe로 승격하지 않는다.
+- 원문 인분은 '2인분', '2 servings'처럼 명시된 경우만 사용한다. recipeYield=12를 12인분으로 추정하지 않는다.
+- 승인 원천만 TAVILY_WEB과 sourceUrl로 저장한다. sourceRecipeId는 URL의 SHA-256, revision은 본문의 SHA-256이다. 제목만으로 원천 간 중복을 제거하지 않는다.
+- 파싱 성공은 식품 안전·맛·모든 문장의 정확성 검수 완료를 뜻하지 않는다. 일반/확인 후보 판정을 다시 수행한다.
+- 공급자 미설정·장애·후보 미확보 시 기존 일반 추천과 확인 후보를 유지하며 경고한다. 정상 DB에 후보가 없다는 이유만으로 503을 반환하지 않는다. DB 자체 의존성 오류는 503이다.
+- 웹 원문 저장 승인 호스트가 없으면 Tavily 키만 넣어도 자동 수집하지 않는다. 검색 API 이용 권한이 대상 콘텐츠 재배포 권한을 대신하지 않는다.
 
-## 평가
+## AI 입력과 시간·캐시
 
-같은 재고의 AI 비활성 기본 추천과 단일 RANK 결과를 비교한다. 임박 재료 활용, 미보유 주재료, 추가 구매 부담, 원문 보존, 응답 시간과 토큰을 따로 평가한다. AI가 품질을 개선하지 못하면 호출을 제거하거나 적용 조건을 좁힌다. 단위 시험은 계약 검증이며 모델 품질·속도 개선의 실측 증거가 아니다.
+- 정책 recipe-rerank-v7, 프롬프트 recipe-grounded-v3. FastAPI와 Worker를 함께 배포한다.
+- 일반 후보 기본 상한은 12개다. 공개 응답의 ingredients / steps / amountText는 전체 원문을 유지한다.
+- RANK JSON 입력 예산은 24,000바이트다. 초과하면 재료를 번호 기반 배열로 표현하고 ingredientColumns로 열 뜻을 전달한다. 보유·부족·임박 목록도 같은 원문 번호를 참조한다. 후보와 원문 재료 개수는 줄이지 않는다.
+- 압축 입력은 원문 조리 첫 2단계·각 100자와 단계 수를 보존하고 detailsReduced / stepsMayBeTruncated로 생략 여부를 알린다. 여전히 초과하면 기본 추천으로 돌아간다.
+- 외부 보충 공유 예산은 min(20초, RECIPE_AI_TIMEOUT_SECONDS / 2)이며 식품안전나라 한 번의 대기는 최대 10초다. 남은 예산을 Tavily에 전달한다. RANK는 생성 시작 후 경과 시간을 뺀 남은 AI 예산으로 실행한다.
+- 기본 AI 예산은 45초다. DB 드라이버·동기 파싱·취소 지연까지 포함한 엄격한 HTTP SLA나 GPU 커널 즉시 중단 보장은 아니다.
+- AI 실패·외부 장애 결과는 캐싱하지 않는다. 의도적 AI 비활성·단일 후보 결과는 캐싱할 수 있다.
+- 캐시에는 정책·모델·프롬프트·재고·냉장고·제외·전략·인분·limit·양념·공급자 활성/승인 설정·승인 호스트·서울 날짜를 포함한다.
+- trace의 호출 수는 캐시 원본을 생성할 때의 값이다. 캐시 재조회가 새 AI·검색 호출을 했다는 뜻은 아니다.
+- trace.searchCount는 DB 조회 0~1, externalSearchCount는 식품안전나라 호출 시도 0~1, webSearchCount는 Tavily 검색 시도 0~2다. candidateCount는 역할 필터 전의 중복 제거 후보 수다.
 
-AI 정렬이 성공하면 추가 모델 호출 없이 `recipe_rank_comparison`에 동일 후보·동일 limit의 기본 순위와 AI 순위를 기록한다. 반환 수, 수치 충족 수, 구매 필요 수, 미보유 주재료·전체 재료 수, 상위 3개의 구매 부담, 활용 임박 재료 종류 수와 순서 변경 여부다. 식별자·재고 원문은 이 비교 로그에 넣지 않는다. `recipe_candidate_filter`는 미보유 주재료·미검토 누락 후보 수와 최종 적격 후보 수를 기록한다. 제외 사유는 중첩될 수 있어 합계가 전체 후보 수와 같다는 뜻은 아니다.
+## API 추가 필드와 기존 계약
 
-이는 사실 집계이며 맛·선호도·사용자 만족도를 측정한 점수가 아니다. AI 자동 생략 기준을 이미 학습했다는 뜻도 아니다. 역할 AI 사전 분류·DB 저장 및 검토 승인 흐름은 아직 도입하지 않았고, 현재는 제목·명시 규칙의 로컬 캐시만 사용한다. 그 기능을 추가할 때 원천 revision·모델 버전·검토 여부를 분리하고 승인되지 않은 AI 추측을 확정 역할로 쓰지 않아야 한다.
+POST /ai/v1/recipe-recommendations의 인증은 X-Internal-API-Key를 유지한다. 요청 필드는 바꾸지 않는다.
 
-사진 우선 큐나 GPU 병렬화는 이번 정책 변경에 포함하지 않는다. 공유 LLM 슬롯으로 인한 경합은 여전히 관측·조정 대상이다.
+| 위치 | 필드 | 의미 |
+| --- | --- | --- |
+| 응답 | confirmationCandidates | 최대 3개의 종류·역할 확인 후보. 일반 추천과 별도 표시 |
+| 응답 | uncoveredExpiringIngredients | 일반 추천의 MAIN으로 아직 활용하지 못한 임박 이름 |
+| 레시피 원천·추천 | sourceUrl | 웹 원문 URL. 기존 원천은 null 가능 |
+| 추천·확인 후보 | confirmationReasons | 종류·상태·역할·인분 확인 이유 |
+| 추천·확인 후보 | usesExpiringMainIngredients | 정확 매칭 임박 MAIN 이름 |
+| trace | externalSearchCount / webSearchCount | 원본 생성 시 공급자 호출 시도 수 |
+
+mealPlan은 빈 focusIngredientIds/ideas를 유지한다. score는 규칙 후보 점수이며 AI 신뢰도나 최종 순위 점수가 아니다. 확인 후보를 일반 추천으로 합치거나 '바로 조리 가능'으로 표시하지 않는다.
+
+새 SQL은 없다. 원천 확장 필드는 기존 JSONB snapshot/raw_source에 들어간다. 백엔드 동기화에서도 sourceUrl 추가 필드 처리를 확인해야 한다. 실제 재고 수정·차감·사용자 선택 피드백·모델 가중치 학습·전역 피드백 승격은 수행하지 않는다.
+
+## 경고
+
+기존 경고에 다음이 추가된다.
+
+- CONFIRMATION_CANDIDATES_SEPARATED: 확인 후보를 별도 목록으로 분리.
+- UNCOVERED_EXPIRING_INGREDIENTS: 일반 추천으로 활용되지 않은 임박 재료가 남음.
+- WEB_SEARCH_NOT_CONFIGURED_OR_APPROVED: Tavily 키 또는 승인 호스트 목록 미설정.
+- WEB_SEARCH_UNAVAILABLE: 웹 검색 오류·시간 예산 소진, 기존 결과 유지·미캐싱.
+- WEB_SEARCH_NO_VERIFIED_RECIPE: 검색했으나 원문 검증을 통과한 레시피가 없음.
+
+AI_UNAVAILABLE_OR_INVALID, AI_ORDER_CONSTRAINED_BY_ELIGIBILITY, RULE_RESULTS_NOT_AI_JUDGEMENT, MISSING_MAIN_INGREDIENT_RECIPES_EXCLUDED, UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK 등의 기존 경고도 유지한다.
+
+## 검증 범위
+
+성공 응답률과 추천 의미 품질을 구분한다. 정확한 식품 연결 0개인 일반 추천 수, 미보유 핵심 식품 통과 수, 임박 MAIN 활용, 추가 구매 부담, 확인 후보 수, 원문 보존, AI 실제 호출·입력 예산을 각각 검증한다.
+
+HTTP 모형 시험은 Tavily 요청 형식·승인 호스트·본문 파싱·실패 보존 검증이지 실제 검색 품질 실측이 아니다. 승인 원천 재생도 실제 dev/GPU 시험과 구분한다. 사용자 선택·실제 조리·건너뛴 이유의 학습 연동은 피드백 계약과 평가 데이터를 정한 후의 별도 범위다.
+
+공식 API 참고: [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search). 구조화 원천과 일반 검색 결과의 콘텐츠 조건은 각각 확인한다.

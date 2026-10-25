@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROMPT_VERSION = "recipe-grounded-v2"
+PROMPT_VERSION = "recipe-grounded-v3"
 Strategy = Literal["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"]
 
 

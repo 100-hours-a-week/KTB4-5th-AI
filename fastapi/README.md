@@ -1,6 +1,6 @@
 # 다먹자 FastAPI 서비스
 
-레시피 추천은 확정 재고로 PostgreSQL 원천 검색 → 주재료·분량 검증 및 필요 시 승인된 원천 보충 → 실제 임박 재료 우선 정렬 → Gemma 순위 조정 1회 → 검증을 수행한다. 사진 분석 큐와 별개인 동기 API이며, Worker 장애 시 기본 검색임을 RULE_FALLBACK으로 표시한다. 모듈과 데이터 경계는 [AI 재고 활용 추천 설계](docs/recipe_ai_recommendations.md)에 정리한다.
+레시피 추천은 확정 재고로 PostgreSQL 검색 → 일반 추천·확인 후보 분리 → 미활용 임박 재료의 승인된 식품안전나라·Tavily 보충 → 임박 주재료·적합성 정렬 → Gemma RANK 최대 1회 → 검증을 수행한다. 적합한 후보가 적으면 그대로 반환한다. 사진 분석 큐와 별개인 동기 API이며 Worker 장애는 RULE_FALLBACK으로 표시한다. 원문·분량·계열 확인과 데이터 경계는 [AI 재고 활용 추천 설계](docs/recipe_ai_recommendations.md)에 정리한다.
 
 이 폴더는 다먹자 이미지 분석 시스템의 **제어 영역(control plane)** 이다. 백엔드의 분석 요청을
 접수하고, GPU Worker의 모델 추론 결과를 서비스 데이터로 해석한 뒤, 최종 결과를 백엔드에

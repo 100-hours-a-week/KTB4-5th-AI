@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
+from time import monotonic
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,7 @@ from app.recipes.repository import RecipeRepository
 from app.recipes.retrieval import TITLE_MATCH_VERSION, allowed, canonical, is_excluded, missing_named_ingredients, query_variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
 from app.recipes.suitability import WATER_NAMES, assess_suitability, ingredient_role
+from app.recipes.web_provider import WebRecipeProvider
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class RecipeService:
         self._ai_slots = asyncio.Semaphore(2)
         self.repository = repository or RecipeRepository(settings)
         self.provider = provider or FoodSafetyProvider(settings)
+        self.web_provider = WebRecipeProvider(settings)
         self.cache = BoundedAsyncCache[RecommendationResponse](settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
 
     # 재료 이름·제외 목록·날짜별 캐시를 검증하고 확정 재고 기반 추천을 반환한다.
@@ -42,10 +46,13 @@ class RecipeService:
         key = json.dumps([POLICY_VERSION, TITLE_MATCH_VERSION, PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
                           request.inventoryFingerprint, excluded, request.recommendationMode, request.limit, request.targetServings,
                           request.strategies, requested_pantry, self.settings.recipe_ai_max_candidates,
-                          bool(self.settings.recipe_food_safety_api_key), self.settings.recipe_food_safety_storage_approved, today.isoformat()], ensure_ascii=False)
+                          bool(self.settings.recipe_food_safety_api_key), self.settings.recipe_food_safety_storage_approved,
+                          bool(self.settings.recipe_tavily_api_key), sorted(self.settings.recipe_tavily_approved_domains), today.isoformat()], ensure_ascii=False)
 
         # 캐시 미스 시 DB를 우선 조회하고 부족하면 승인된 원천을 최대 한 번 보충한다.
         async def load() -> RecommendationResponse:
+            started = monotonic()
+            external_deadline = started + min(20, self.settings.recipe_ai_timeout_seconds / 2)
             inventory = [item for item in request.inventory if not is_excluded(item.name, excluded)
                          and canonical(item.name) not in WATER_NAMES
                          and (request.recommendationMode == "INCLUDE_EXPIRED" or item.expirationDate >= today)]
@@ -72,13 +79,7 @@ class RecipeService:
             search_names = list(dict.fromkeys(item.name for item in sorted(inventory, key=lambda item: (item.expirationDate, item.ingredientId))))
             source = "DATABASE"
             external_searched = False
-            if names and not candidates:
-                external_searched = True
-                source = "FOOD_SAFETY_KOREA"
-                found = await self.provider.search(search_names)
-                for recipe, raw in found:
-                    await self.repository.save(recipe, raw, "operator-approved:COOKRCP01")
-                candidates = [recipe for recipe, _ in found if usable(recipe)]
+            web_searches = 0
             # 원문 재료·조리법·분량을 보존한 채 동일한 기준으로 후보를 채점한다.
             def score_candidate(recipe: Recipe) -> dict:
                 ingredients = {}
@@ -86,7 +87,8 @@ class RecipeService:
                     ingredients.setdefault(canonical(item.name), item.name)
                 used = set(ingredients).intersection(names)
                 urgent = used.intersection(expiring)
-                missing = set(ingredients) - used - set(pantry) - WATER_NAMES
+                recipe_pantry = [name for name in pantry if ingredient_role(recipe.name, name)[0] == "SEASONING"]
+                missing = set(ingredients) - used - set(recipe_pantry) - WATER_NAMES
                 named = missing_named_ingredients(recipe.name, list(ingredients.values()), list(ingredients.values()))
                 missing_named = missing_named_ingredients(recipe.name, list(ingredients.values()), [ingredients[name] for name in missing])
                 breakdown = {"expiringIngredient": round(0.4 * len(urgent) / max(1, len(expiring)), 6),
@@ -99,25 +101,27 @@ class RecipeService:
                             excludedIngredientCheck="PASSED", reason=f"보유 재료 {len(used)}종 사용, 3일 내 소비기한 재료 {len(urgent)}종, 추가 재료 {len(missing)}종입니다.")
                 if missing_named:
                     data["reason"] += f" 제목에 명시된 미보유 재료: {', '.join(missing_named)}."
-                data.update(assess_quantities(recipe, inventory, request.targetServings, pantry))
+                data.update(assess_quantities(recipe, inventory, request.targetServings, recipe_pantry))
                 data["_suitability"] = assess_suitability(data, original_names)
-                if "USE_EXPIRING" in request.strategies:
-                    dates = [item.expirationDate for item in inventory if canonical(item.name) in urgent and 0 <= (item.expirationDate - today).days <= 3]
-                    data["_expiryPriority"] = (0, min(dates).toordinal(), -len(urgent)) if dates else (1, 0, 0)
                 return data
             ranked = [score_candidate(recipe) for recipe in candidates]
             ranked.sort(key=lambda item: (-item["score"], item["source"], item["sourceRecipeId"]))
             baseline = build_baseline(ranked, request)
-            # DB 후보가 있어도 필터 후 부족하면 임박 재료부터 한 번 보충한다. 저장 승인을 우회하지 않는다.
-            needs_more = len(baseline) < request.limit or ("USE_EXPIRING" in request.strategies and expiring and not any(row["usesExpiringIngredients"] for row in baseline))
+            # 개수를 채우지 않는다. 아직 일반 추천의 주재료로 활용하지 못한 임박 이름을 찾는다.
+            def uncovered(rows: list[dict]) -> list[str]:
+                covered = {canonical(name) for row in rows for name in row["usesExpiringMainIngredients"]}
+                return list(dict.fromkeys(item.name for item in sorted(inventory, key=lambda item: (item.expirationDate, item.ingredientId))
+                                         if canonical(item.name) in expiring - covered))
+
+            focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
+            needs_more = not baseline or bool(focus)
             if names and needs_more and not external_searched:
                 if self.settings.recipe_food_safety_api_key and self.settings.recipe_food_safety_storage_approved:
                     external_searched = True
                     try:
-                        found = await self.provider.search(search_names)
-                    except AppError:
-                        if not baseline:
-                            raise
+                        async with asyncio.timeout(max(0.1, min(10, external_deadline - monotonic()))):
+                            found = await self.provider.search(focus or search_names)
+                    except (AppError, TimeoutError):
                         ranker.warnings.append("EXTERNAL_REPLENISHMENT_UNAVAILABLE")
                     else:
                         merged = {(row["source"], row["sourceRecipeId"]): row for row in ranked}
@@ -132,6 +136,34 @@ class RecipeService:
                         source = "DATABASE_AND_FOOD_SAFETY_KOREA"
                 else:
                     ranker.warnings.append("EXTERNAL_REPLENISHMENT_NOT_CONFIGURED")
+            focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
+            # 구조화 원천 보충 뒤에도 핵심 임박 재료가 빠지면 최후로 승인된 웹 원천을 검색한다.
+            if names and (focus or not baseline):
+                if self.settings.recipe_tavily_api_key and self.settings.recipe_tavily_approved_domains:
+                    report = await self.web_provider.search(focus or search_names[:1], search_names, timeout_seconds=max(0.1, external_deadline - monotonic()))
+                    web_searches = report.searches
+                    if report.unavailable:
+                        ranker.warnings.append("WEB_SEARCH_UNAVAILABLE")
+                    merged = {(row["source"], row["sourceRecipeId"]): row for row in ranked}
+                    for recipe, raw in report.recipes:
+                        # 어댑터 이후에도 ACTIVE·제외 조건을 다시 검사한다.
+                        if (recipe.source == "TAVILY_WEB" and recipe.sourceUrl and raw.get("url") == recipe.sourceUrl
+                                and urlsplit(recipe.sourceUrl).hostname in self.settings.recipe_tavily_approved_domains and usable(recipe)):
+                            await self.repository.save(recipe, raw, "operator-approved:TAVILY_WEB")
+                            merged[(recipe.source, recipe.sourceRecipeId)] = score_candidate(recipe)
+                    ranked = list(merged.values())
+                    baseline = build_baseline(ranked, request)
+                    source += "_AND_TAVILY_WEB"
+                    if web_searches and not report.recipes:
+                        ranker.warnings.append("WEB_SEARCH_NO_VERIFIED_RECIPE")
+                else:
+                    ranker.warnings.append("WEB_SEARCH_NOT_CONFIGURED_OR_APPROVED")
+            confirmations = build_baseline(ranked, request, confirmation_only=True)[:3]
+            if confirmations:
+                ranker.warnings.append("CONFIRMATION_CANDIDATES_SEPARATED")
+            focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
+            if focus:
+                ranker.warnings.append("UNCOVERED_EXPIRING_INGREDIENTS")
             missing_main_count = sum(bool(row["_suitability"]["missingMain"]) for row in ranked)
             unresolved_count = sum(bool(row["_suitability"]["unresolvedMissing"]) for row in ranked)
             if missing_main_count:
@@ -139,6 +171,7 @@ class RecipeService:
             if unresolved_count:
                 ranker.warnings.append("UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK")
             shortlist = baseline[:self.settings.recipe_ai_max_candidates]
+            ranker.timeout = max(0.1, self.settings.recipe_ai_timeout_seconds - (monotonic() - started))
             selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and len(shortlist) > 1 else None
             if self.settings.recipe_ai_enabled and len(shortlist) == 1:
                 ranker.warnings.append("AI_NOT_NEEDED_SINGLE_CANDIDATE")
@@ -165,13 +198,16 @@ class RecipeService:
             return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", refrigeratorId=request.refrigeratorId,
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=[{key: value for key, value in row.items() if not key.startswith("_")} for row in result],
+                                          confirmationCandidates=[{key: value for key, value in row.items() if not key.startswith("_")} for row in confirmations],
+                                          uncoveredExpiringIngredients=focus,
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           mealPlan={}, warnings=list(dict.fromkeys(ranker.warnings)),
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls else None,
-                                                 "aiCalls": ranker.calls, "searchCount": searches, "candidateCount": len(ranked)})
+                                                 "aiCalls": ranker.calls, "searchCount": searches, "candidateCount": len(ranked),
+                                                 "externalSearchCount": int(external_searched), "webSearchCount": web_searches})
 
         result = await self.cache.get_or_load(key, load)
-        if {"AI_UNAVAILABLE_OR_INVALID", "EXTERNAL_REPLENISHMENT_UNAVAILABLE"}.intersection(result.warnings):
+        if {"AI_UNAVAILABLE_OR_INVALID", "EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}.intersection(result.warnings):
             self.cache.forget(key)
         return result.model_copy(deep=True)
 

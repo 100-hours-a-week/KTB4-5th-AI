@@ -115,6 +115,7 @@ class RecipeSnapshot(Contract):
     sourceRevision: Text
     name: Text
     imageUrl: str | None = None
+    sourceUrl: str | None = Field(default=None, max_length=4096, pattern=r"^https?://")
     baseServings: float | None = Field(default=None, gt=0)
     ingredients: list[Ingredient] = Field(min_length=1, max_length=200)
     steps: list[Step] = Field(min_length=1, max_length=100)
@@ -176,16 +177,20 @@ class RecommendedRecipe(RecipeSnapshot):
     essentialIngredientNos: list[int] = Field(default_factory=list)
     missingEssentialIngredientNos: list[int] = Field(default_factory=list)
     feasibility: Literal["NEEDS_SHOPPING", "NEEDS_CHECK", "QUANTITY_VERIFIED"] = "NEEDS_CHECK"
+    confirmationReasons: list[str] = Field(default_factory=list)
+    usesExpiringMainIngredients: list[str] = Field(default_factory=list)
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v6"
+    policyVersion: str = "recipe-rerank-v7"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
     searchCount: int = 0
     candidateCount: int = 0
+    externalSearchCount: int = 0
+    webSearchCount: int = 0
 
 
 class MealPlan(Contract):
@@ -199,6 +204,8 @@ class RecommendationResponse(Contract):
     inventoryFingerprint: str
     recommendationMode: str
     recommendations: list[RecommendedRecipe]
+    confirmationCandidates: list[RecommendedRecipe] = Field(default_factory=list, max_length=3)
+    uncoveredExpiringIngredients: list[str] = Field(default_factory=list)
     generatedAt: datetime
     recommendationEngine: Literal["AI", "RULE_FALLBACK", "EMPTY"] = "RULE_FALLBACK"
     mealPlan: MealPlan = Field(default_factory=MealPlan)
