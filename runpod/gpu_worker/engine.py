@@ -18,6 +18,7 @@ from app.domain.receipt_rules import (
     build_food_candidate_lines,
     build_receipt_product_rows,
     is_non_food,
+    is_product_description,
     known_food_category,
     sanitize_lines,
 )
@@ -295,11 +296,20 @@ class GpuInferenceEngine:
         return output_lines, selected, diagnostics
 
     @staticmethod
+    # 포장 홍보·원재료·제조사 설명은 구체적인 상품명 OCR 힌트로 사용하지 않는다.
+    def _is_product_copy(segment: str) -> bool:
+        return is_product_description(segment)
+
+    @staticmethod
     # 명확한 OCR 식품 키워드가 있으면 Gemma 호출 없이 상품 후보를 생성한다.
     def _candidate_from_ocr_hint(ocr_hint: str) -> ClassifiedFoodLine | None:
         segments = [value.strip() for value in ocr_hint.split(" / ")]
         for index, segment in enumerate(segments):
             if not segment or segment.startswith("객체검출 유형:"):
+                continue
+            # 포장 상단의 홍보 문구·원재료 설명을 상품명으로 확정하면 실제 이름을 보기 전에
+            # Gemma를 건너뛴다. 구체적인 이름이 없으면 None으로 돌려 비전 추론을 유지한다.
+            if GpuInferenceEngine._is_product_copy(segment):
                 continue
             category = known_food_category(segment)
             if category is not None:
@@ -314,7 +324,7 @@ class GpuInferenceEngine:
     def _prefer_ocr_product_name(model_name: str, ocr_hint: str) -> str:
         compact_model = "".join(model_name.lower().split())
         for segment in (value.strip() for value in ocr_hint.split(" / ")):
-            if not segment or segment.startswith("객체검출 유형:") or not any("가" <= char <= "힣" for char in segment):
+            if not segment or segment.startswith("객체검출 유형:") or GpuInferenceEngine._is_product_copy(segment) or not any("가" <= char <= "힣" for char in segment):
                 continue
             compact_segment = "".join(segment.lower().split())
             if len(compact_segment) > len(compact_model) and compact_model in compact_segment:

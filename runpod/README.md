@@ -4,9 +4,9 @@
 문자 인식, 상품 영역 검출과 멀티모달 모델 추론을 수행하고 구조화된 원시 결과를 FastAPI 서버에
 반환한다.
 
-레시피에서는 기존 Gemma로 텍스트 계획·후보 선택도 수행한다. `POST /internal/v1/recipes/reason`은 PLAN/SELECT만 받고 기존 `X-Worker-API-Key`로 인증한다. DB 검색·분량 계산·재고 차감 권한은 Worker에 없으며 FastAPI가 준 후보 ID와 원천 재료 번호만 제안한다. `gpu_worker/recipe_reasoner.py`가 JSON Schema 출력을 검증하고 `recipe_contract.py`가 공통 계약을 정의한다. 사진과 같은 inference/LLM 세마포어를 공유하므로 자원 경합이 발생할 수 있다.
+레시피에서는 기존 Gemma로 검증된 후보의 순서만 조정한다. `POST /internal/v1/recipes/reason`의 현행 경로는 RANK이며 기존 `X-Worker-API-Key`로 인증한다. DB 검색·분량 계산·재고 차감 권한은 Worker에 없고, FastAPI가 준 후보 ID 전체를 정확히 한 번씩 반환한다. `gpu_worker/recipe_reasoner.py`가 JSON Schema·순열을 검증하고 `recipe_contract.py`가 공통 계약을 정의한다. PLAN/SELECT는 배포 전환 호환을 위해 수용하지만 현 추천 서비스는 호출하지 않는다. 사진과 같은 inference/LLM 세마포어를 공유하므로 자원 경합이 발생할 수 있다.
 
-SELECT의 출력 스키마는 요청 후보별 재료 번호와 선택 개수를 제한한다. FastAPI가 남은 실행 예산을 전달하면 슬롯 대기부터 해당 예산으로 제한하며, 단계별 대기·토큰·프리필·생성·로딩 시간을 로그로 구분한다. 표시용 추천 이유는 FastAPI가 검증된 원천·재고 사실로 구성한다.
+RANK는 후보 개수와 같은 길이의 candidateIds 순열만 출력한다. 후보 삭제·요리 생성·분량 추론은 하지 않으며 실패 시 FastAPI가 기본 추천을 유지한다. FastAPI가 실행 예산을 전달하면 슬롯 대기부터 해당 예산으로 제한하며, 대기·토큰·프리필·생성·로딩 시간을 로그로 구분한다. 표시용 추천 이유는 FastAPI가 검증된 원천·재고 사실로 구성한다.
 
 Worker는 재고 서비스의 업무 규칙을 소유하지 않는다. PostgreSQL을 조회하거나 소비기한을 확정하지
 않고, 분석 큐와 백엔드 콜백도 관리하지 않는다. 이 경계를 지켜야 모델 구성이나 GPU 제공자를 바꿔도

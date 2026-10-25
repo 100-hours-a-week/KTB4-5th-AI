@@ -2,11 +2,11 @@
 
 ## 역할
 
-백엔드가 소유권을 검증한 확정 재고를 전달하면 캐시를 확인하고, miss일 때 RunPod Gemma 계획 → AI PostgreSQL 원천 검색 → 코드 분량 계산 → Gemma 후보 선택 → 코드 검증을 수행한다. AI 장애는 RULE_FALLBACK으로 구분한다. 사진 분석 큐나 백엔드 MySQL 재고는 수정하지 않는다. 현행 v3 정책은 [AI 재고 활용 추천](recipe_ai_recommendations.md)을 기준으로 한다.
+백엔드가 소유권을 검증한 확정 재고를 전달하면 캐시를 확인하고, miss일 때 AI PostgreSQL 원천 검색 → 코드 적합성·분량 검증 → 선택적 Gemma RANK 1회 → 순서 검증을 수행한다. AI 실패·생략에도 기본 추천을 유지하고 RULE_FALLBACK으로 구분한다. 사진 분석 큐나 백엔드 MySQL 재고는 수정하지 않는다. 현행 v4 정책은 [단일 AI 순위 조정 추천](recipe_ai_recommendations.md)을 기준으로 한다. Tavily는 원천 조사 도구이며 이 요청 경로에서 자동 호출하지 않는다.
 
 - `app/recipes/schemas.py`: 재고·원천 스냅샷·단위·정렬 검증
 - `app/recipes/service.py`: 소비기한 필터, 제외 재료 필터, 점수·캐시
-- `app/recipes/planning.py`, `ai.py`, `ai_contract.py`: 제한된 AI 계획·선택·Worker 계약
+- `app/recipes/planning.py`, `ai.py`, `ai_contract.py`: 기본 추천·단일 AI 순위 조정·Worker 계약
 - `app/recipes/quantities.py`: 원본 인분 기준 필요량·부족량·재고 ID별 가상 잔량
 - `app/recipes/repository.py`: PostgreSQL 원본 저장 및 변경 이력
 - `app/recipes/food_safety.py`: COOKRCP01 검색·보수적 정규화
@@ -35,7 +35,7 @@
 
 ## 이전 기준선 — 추천 정책 v1
 
-아래는 AI 계획·선택 도입 전 규칙 검색 기준선이다. 현행 요청·응답·캐시는 위 링크의 v2를 따른다. 뒤쪽 날짜별 기록도 당시 실험 범위이며 현재 배포 상태를 보증하지 않는다.
+아래는 과거 규칙 검색 기준선이다. 현행 요청·응답·캐시는 위 링크의 v4를 따른다. 뒤쪽 날짜별 기록도 당시 실험 범위이며 현재 배포 상태를 보증하지 않는다.
 
 - 기본 EXCLUDE_EXPIRED. 서울 날짜 기준 `expirationDate < 오늘`만 제외한다. 당일은 포함한다.
 - 레시피 재료명과 재고명은 위의 문자열 정규화 후 정확히 비교한다. 의미 검색·동의어 추측·수량 충족 보장은 하지 않는다.

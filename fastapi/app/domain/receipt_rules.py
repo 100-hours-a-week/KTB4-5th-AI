@@ -55,7 +55,7 @@ KNOWN_FOOD_CATEGORY_RULES = (
     (re.compile(r"바리스타|커피|coffee|coke|sprite|soda|음료|주스|콜라|샘물|생수|워터|water|소주|처음처럼|맥주|와인|수라즈|쉬라즈|까베르네|조니워커|하이네켄|삿포로|아사히|칭타오", re.I), Category.BEVERAGE),
     (
         re.compile(
-            r"젤리|꼬깔콘|포스틱|감자칩|감자원|과자|카스타드|커스터드|custard|컵누들|비빔면|우동맛|짜파게|라면|피자|콤비네이션|호떡|"
+            r"젤리|꼬깔콘|포스틱|감자칩|감자원|과자|약과|카스타드|커스터드|custard|컵누들|비빔면|우동맛|짜파게|라면|피자|콤비네이션|호떡|"
             r"초코|쿠키|오레오|빼빼로|빼빼롯|마이쮸|마이쯤|츄러스|사탕|쫄병|오사쯔|"
             r"\b(?:rice|fried|fry|masala|biryani|curry|roll|buffet|dinner|lunch|chips|salsa|tostones)\b",
             re.I,
@@ -135,6 +135,13 @@ RECEIPT_METADATA_PATTERN = re.compile(
 # 상품명이 생활용품(비식품) 규칙에 해당하는지 반환한다.
 def is_non_food(text: str) -> bool:
     return NON_FOOD_PATTERN.search(text) is not None
+
+
+# 포장 홍보·원재료·제조사 설명은 개별 상품명 후보로 확정하지 않는다.
+def is_product_description(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    generic = {"전통과자", "전통식품", "한국전통과자", "가공식품", "식품", "과자", "스낵"}
+    return bool(re.search(r"대한민국|이어온|전년을|원재료|원산지|영양정보|영양성분|제조원|판매원|품목보고|알레르기", compact)) or compact in generic
 
 
 # 영수증 문자열이 상품이 아닌 결제 메타데이터나 메뉴 구성 설명인지 반환한다.

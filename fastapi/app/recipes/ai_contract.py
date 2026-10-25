@@ -28,14 +28,18 @@ class SelectionResult(WireModel):
     selections: list[Selection] = Field(max_length=20)
 
 
+class RankResult(WireModel):
+    candidateIds: list[int] = Field(min_length=1, max_length=20)
+
+
 class RecipeAiRequest(WireModel):
-    stage: Literal["PLAN", "SELECT"]
+    stage: Literal["PLAN", "SELECT", "RANK"]
     # 값 내부도 FastAPI에서 만든 재고·원천 스냅샷이다. Worker는 도구 실행·DB 접근을 하지 않는다.
     context: dict
 
 
 class RecipeAiResponse(WireModel):
-    stage: Literal["PLAN", "SELECT"]
-    result: PlanResult | SelectionResult
+    stage: Literal["PLAN", "SELECT", "RANK"]
+    result: PlanResult | SelectionResult | RankResult
     model: str
     promptVersion: str = PROMPT_VERSION

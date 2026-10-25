@@ -23,6 +23,7 @@ from app.domain.receipt_rules import (
     build_supplemental_receipt_rows,
     correct_common_ocr_errors,
     is_non_food,
+    is_product_description,
     is_receipt_metadata,
     known_food_category,
     normalize_product_name,
@@ -412,7 +413,7 @@ class ReceiptAnalysisPipeline:
         request = record.request
         # 비전 Worker가 후보를 돌려준 실물 사진은 OCR 조각을 독립 상품으로 다시 해석하지 않는다.
         # 포장 전면의 브랜드·맛·용량 문구가 각각 상품으로 중복되는 문제를 막는다.
-        candidates = [] if remote_model_candidates else [line for line in build_food_candidate_lines(safe_lines) if not is_non_food(line.text)]
+        candidates = [] if remote_model_candidates else [line for line in build_food_candidate_lines(safe_lines) if not is_non_food(line.text) and not is_product_description(line.text)]
         selected: list[ClassifiedFoodLine] = []
         seen_names: set[str] = set()
         vision_line_numbers = {candidate.line_no for candidate in remote_model_candidates or () if candidate.reason in {"vision_model", "yolo_crop_vision_model"}}
@@ -455,7 +456,7 @@ class ReceiptAnalysisPipeline:
         # 고른 상품은 우선 유지하고, 글자가 없거나 낯선 포장 상품만 vision_model 후보로 보완한다.
         if remote_model_candidates:
             for candidate in _prefer_korean_product_candidates(remote_model_candidates):
-                if is_non_food(candidate.normalized_name) or is_receipt_metadata(candidate.normalized_name):
+                if is_non_food(candidate.normalized_name) or is_receipt_metadata(candidate.normalized_name) or is_product_description(candidate.normalized_name):
                     continue
                 catalog_match = await self._lookup_catalog_category(candidate.normalized_name) if self._product_catalog_lookup is not None else None
                 if catalog_match is not None:

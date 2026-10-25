@@ -5,6 +5,10 @@ from app.recipes.schemas import Recipe, normalize
 # 명시적 동의어만 사용한다. 순두부/두부, 우유/두유처럼 대체 가능성을 추측하지 않는다.
 ALIASES = {"달걀": "계란", "쇠고기": "소고기", "우육": "소고기", "돈육": "돼지고기", "무우": "무", "브로컬리": "브로콜리"}
 
+# 제목의 주재료 누락 경고에만 쓰는 검토된 표기 관계다. 재고 매칭·단위 환산·대체 가능성에는 쓰지 않는다.
+TITLE_INGREDIENT_TERMS = {"통오징어": "오징어", "무청시래기": "시래기", "모차렐라치즈": "치즈", "플레인요거트": "요거트"}
+TITLE_MATCH_VERSION = "title-ingredient-v2"
+
 
 # 공백·유니코드 정규화 뒤 검토된 별칭만 치환한다.
 def canonical(name: str) -> str:
@@ -17,7 +21,19 @@ def missing_named_ingredients(name: str, ingredient_names: list[str], missing_na
     title = canonical(name)
     missing = {canonical(value) for value in missing_names}
     # '무'→'무침'처럼 한 글자 부분 문자열이 다른 단어에 걸리는 오탐을 피한다.
-    return [value for value in ingredient_names if canonical(value) in missing and any(len(alias) >= 2 and alias in title for alias in variants([value]))]
+    result = []
+    for value in ingredient_names:
+        if canonical(value) not in missing:
+            continue
+        terms = set(variants([value]))
+        # 괄호의 조리 상태는 원문·분량 계산에 보존하고, 제목 연결에만 접두 명칭을 사용한다.
+        base = canonical(value).split("(", 1)[0]
+        terms.add(base)
+        if base in TITLE_INGREDIENT_TERMS:
+            terms.add(TITLE_INGREDIENT_TERMS[base])
+        if any(len(term) >= 2 and term in title for term in terms):
+            result.append(value)
+    return result
 
 
 # DB 문자열 검색용 이름 집합을 정확 이름과 검토된 별칭으로 확장한다.

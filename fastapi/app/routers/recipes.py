@@ -8,7 +8,7 @@ from app.recipes.schemas import ChangesResponse, RecommendationRequest, Recommen
 router = APIRouter(prefix="/ai/v1", tags=["recipes"], dependencies=[Depends(authenticate_service)])
 
 
-# 확정 재고로 AI 활용 계획·근거 레시피 검색·후보 선택·분량 검증을 수행해 추천 대안을 반환한다.
+# 확정 재고로 근거 레시피·분량을 먼저 검증하고 단일 AI 순위 조정 후 추천 대안을 반환한다.
 @router.post("/recipe-recommendations", response_model=RecommendationResponse)
 async def recommend(body: RecommendationRequest, request: Request) -> RecommendationResponse:
     return await request.app.state.recipes.recommend(body)

@@ -9,6 +9,7 @@ prefix = os.environ.get("POD_NAME_PREFIX", "dameokja-ai-worker")
 template_id = os.environ.get("TEMPLATE_ID", "")
 worker_port = int(os.environ.get("WORKER_PORT", "9000"))
 pattern = re.compile(rf"^{re.escape(prefix)}-v(\d+)$")
+migration_pattern = re.compile(rf"^{re.escape(prefix)}-v(\d+)-migration$")
 request = urllib.request.Request(
     "https://api.runpod.io/v2/pods?limit=1000",
     headers={
@@ -24,17 +25,25 @@ except (urllib.error.URLError, json.JSONDecodeError) as exc:
     raise SystemExit(f"Runpod Pod 목록을 가져오지 못했습니다: {exc}") from exc
 
 candidates = []
+migrations = []
 for pod in pods:
+    if template_id and pod.get("template") != template_id:
+        continue
+    # 마이그레이션 중에는 정식 이름의 이전 EXITED Pod에만 최신 이미지를 배포하면 안 된다.
+    # 대상의 데이터 이전·준비 검증과 이름 승격을 마친 뒤 같은 배포를 다시 실행한다.
+    if migration_pattern.fullmatch(str(pod.get("name", ""))) and pod.get("id"):
+        migrations.append(str(pod["id"]))
     match = pattern.fullmatch(str(pod.get("name", "")))
     if not match or pod.get("status") not in {"RUNNING", "EXITED"}:
-        continue
-    if template_id and pod.get("template") != template_id:
         continue
     if pod.get("id"):
         candidates.append((int(match.group(1)), str(pod.get("startedAt") or ""), str(pod["id"])))
 
+if migrations:
+    raise SystemExit("마이그레이션 대상이 남아 있어 이전 Pod 배포를 차단합니다. 이전 완료·이름 승격 후 배포를 다시 실행하세요: " + ", ".join(sorted(migrations)))
+
 if not candidates:
-    raise SystemExit(f"실행 중인 {prefix}-vN Worker를 찾지 못했습니다.")
+    raise SystemExit(f"배포 가능한 {prefix}-vN Worker를 찾지 못했습니다.")
 
 candidates.sort(reverse=True)
 highest_version = candidates[0][0]

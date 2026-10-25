@@ -10,10 +10,10 @@ from app.config import Settings
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION
 from app.recipes.food_safety import FoodSafetyProvider
-from app.recipes.planning import MealPlanner
+from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline
 from app.recipes.quantities import assess_quantities
 from app.recipes.repository import RecipeRepository
-from app.recipes.retrieval import allowed, canonical, is_excluded, missing_named_ingredients, variants
+from app.recipes.retrieval import TITLE_MATCH_VERSION, allowed, canonical, is_excluded, missing_named_ingredients, variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class RecipeService:
         today = datetime.now(ZoneInfo("Asia/Seoul")).date()
         excluded = sorted({normalize(name) for name in request.excludedIngredientNames if normalize(name)})
         pantry = sorted({canonical(name) for name in request.pantryIngredientNames if not is_excluded(name, excluded)})
-        key = json.dumps(["recipe-meal-plan-v3", PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
+        key = json.dumps([POLICY_VERSION, TITLE_MATCH_VERSION, PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
                           request.inventoryFingerprint, excluded, request.recommendationMode, request.limit, request.targetServings,
                           request.strategies, pantry, self.settings.recipe_ai_max_candidates, today.isoformat()], ensure_ascii=False)
 
@@ -45,25 +45,20 @@ class RecipeService:
             original_names = [item.name for item in inventory]
             names = sorted({canonical(name) for name in original_names})
             expiring = {canonical(item.name) for item in inventory if 0 <= (item.expirationDate - today).days <= 3}
-            planner = MealPlanner(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots)
+            ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model)
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit}
             context["expiryPolicy"] = {"urgentWithinDays": 3, "expiringIngredientIds": [item.ingredientId for item in inventory if 0 <= (item.expirationDate - today).days <= 3]}
-            plan = await planner.prepare(context) if inventory and self.settings.recipe_ai_enabled else None
             if inventory and not self.settings.recipe_ai_enabled:
-                planner.warnings.append("AI_DISABLED")
+                ranker.warnings.append("AI_DISABLED")
 
             # 제외 재료 부분 문자열이 포함된 후보도 보수적으로 제외한다. 알레르기 안전 보증은 아니다.
             def usable(recipe: Recipe) -> bool:
                 return allowed(recipe, original_names, excluded)
 
-            focus = [item.name for item in inventory if item.ingredientId in plan.focusIngredientIds] if plan else original_names
-            candidates = [recipe for recipe in await self.repository.find(variants(focus)) if usable(recipe)] if names else []
+            candidates = [recipe for recipe in await self.repository.find(variants(original_names)) if usable(recipe)] if names else []
             searches = 1 if names else 0
-            if plan and {canonical(name) for name in focus} != set(names):
-                candidates += [recipe for recipe in await self.repository.find(variants(original_names)) if usable(recipe)]
-                searches += 1
             candidates = list({(r.source, r.sourceRecipeId): r for r in candidates}.values())
             source = "DATABASE"
             if names and not candidates:
@@ -90,29 +85,42 @@ class RecipeService:
                 data.update(score=score, scoreBreakdown=breakdown, usesInventory=[ingredients[name] for name in sorted(used)],
                             usesExpiringIngredients=[ingredients[name] for name in sorted(urgent)], missingIngredients=[ingredients[name] for name in sorted(missing)],
                             excludedIngredientCheck="PASSED", reason=f"보유 재료 {len(used)}종 사용, 3일 내 소비기한 재료 {len(urgent)}종, 추가 재료 {len(missing)}종입니다.")
+                if missing_named:
+                    data["reason"] += f" 제목에 명시된 미보유 재료: {', '.join(missing_named)}."
                 data.update(assess_quantities(recipe, inventory, request.targetServings, pantry))
                 ranked.append(data)
             ranked.sort(key=lambda item: (-item["score"], item["source"], item["sourceRecipeId"]))
-            selected = await planner.select(context, ranked[:self.settings.recipe_ai_max_candidates], request) if plan and ranked else None
-            engine = "AI" if selected is not None else "RULE_FALLBACK" if ranked else "EMPTY"
+            baseline = build_baseline(ranked, request)
+            shortlist = baseline[:self.settings.recipe_ai_max_candidates]
+            selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and len(shortlist) > 1 else None
+            if self.settings.recipe_ai_enabled and len(shortlist) == 1:
+                ranker.warnings.append("AI_NOT_NEEDED_SINGLE_CANDIDATE")
+            engine = "AI" if selected is not None else "RULE_FALLBACK" if baseline else "EMPTY"
             if engine == "RULE_FALLBACK":
-                planner.warnings.append("RULE_RESULTS_NOT_AI_JUDGEMENT")
-            if selected == []:
-                planner.warnings.append("NO_SUITABLE_AI_CANDIDATES")
+                ranker.warnings.append("RULE_RESULTS_NOT_AI_JUDGEMENT")
+            if ranked and not baseline:
+                ranker.warnings.append("NO_ELIGIBLE_RECIPES")
+            if len(baseline) < request.limit:
+                ranker.warnings.append("CANDIDATE_COUNT_BELOW_REQUEST_LIMIT")
             if request.recommendationMode == "INCLUDE_EXPIRED" and any(item.expirationDate < today for item in inventory):
-                planner.warnings.append("EXPIRED_INVENTORY_INCLUDED_NOT_SAFETY_APPROVAL")
-            result = selected if selected is not None else ranked[:request.limit]
+                ranker.warnings.append("EXPIRED_INVENTORY_INCLUDED_NOT_SAFETY_APPROVAL")
+            # AI가 정렬한 앞부분 뒤에 검증된 기본 후보를 보존한다. 범위를 경고로 명시한다.
+            result = ((selected + baseline[len(shortlist):]) if selected is not None else baseline)[:request.limit]
+            if selected is not None and len(result) > len(shortlist):
+                ranker.warnings.append("AI_RANKED_PREFIX_ONLY")
+            if set(request.strategies) - {row["strategy"] for row in result} and result:
+                ranker.warnings.append("PARTIAL_STRATEGY_COVERAGE")
             logger.info("recipe_recommendation_completed engine=%s source=%s ai_calls=%d search_count=%d candidate_count=%d returned_count=%d",
-                        engine, source, planner.calls, searches, len(ranked), len(result))
+                        engine, source, ranker.calls, searches, len(ranked), len(result))
             return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", refrigeratorId=request.refrigeratorId,
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=result, generatedAt=datetime.now(UTC), recommendationEngine=engine,
-                                          mealPlan=plan.model_dump() if plan else {}, warnings=list(dict.fromkeys(planner.warnings)),
-                                          trace={"policyVersion": "recipe-meal-plan-v3", "model": planner.model, "promptVersion": PROMPT_VERSION if planner.calls else None,
-                                                 "aiCalls": planner.calls, "searchCount": searches, "candidateCount": len(ranked)})
+                                          mealPlan={}, warnings=list(dict.fromkeys(ranker.warnings)),
+                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls else None,
+                                                 "aiCalls": ranker.calls, "searchCount": searches, "candidateCount": len(ranked)})
 
         result = await self.cache.get_or_load(key, load)
-        if result.recommendationEngine == "RULE_FALLBACK" and self.settings.recipe_ai_enabled:
+        if "AI_UNAVAILABLE_OR_INVALID" in result.warnings:
             self.cache.forget(key)
         return result.model_copy(deep=True)
 
