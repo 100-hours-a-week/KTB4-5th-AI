@@ -13,7 +13,7 @@ from app.recipes.food_safety import FoodSafetyProvider
 from app.recipes.planning import MealPlanner
 from app.recipes.quantities import assess_quantities
 from app.recipes.repository import RecipeRepository
-from app.recipes.retrieval import allowed, canonical, is_excluded, variants
+from app.recipes.retrieval import allowed, canonical, is_excluded, missing_named_ingredients, variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class RecipeService:
         today = datetime.now(ZoneInfo("Asia/Seoul")).date()
         excluded = sorted({normalize(name) for name in request.excludedIngredientNames if normalize(name)})
         pantry = sorted({canonical(name) for name in request.pantryIngredientNames if not is_excluded(name, excluded)})
-        key = json.dumps(["recipe-meal-plan-v2", PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
+        key = json.dumps(["recipe-meal-plan-v3", PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
                           request.inventoryFingerprint, excluded, request.recommendationMode, request.limit, request.targetServings,
                           request.strategies, pantry, self.settings.recipe_ai_max_candidates, today.isoformat()], ensure_ascii=False)
 
@@ -49,6 +49,7 @@ class RecipeService:
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit}
+            context["expiryPolicy"] = {"urgentWithinDays": 3, "expiringIngredientIds": [item.ingredientId for item in inventory if 0 <= (item.expirationDate - today).days <= 3]}
             plan = await planner.prepare(context) if inventory and self.settings.recipe_ai_enabled else None
             if inventory and not self.settings.recipe_ai_enabled:
                 planner.warnings.append("AI_DISABLED")
@@ -79,9 +80,11 @@ class RecipeService:
                 used = set(ingredients).intersection(names)
                 urgent = used.intersection(expiring)
                 missing = set(ingredients) - used - set(pantry)
+                named = missing_named_ingredients(recipe.name, list(ingredients.values()), list(ingredients.values()))
+                missing_named = missing_named_ingredients(recipe.name, list(ingredients.values()), [ingredients[name] for name in missing])
                 breakdown = {"expiringIngredient": round(0.4 * len(urgent) / max(1, len(expiring)), 6),
                              "inventoryCoverage": round(0.6 * len(used) / len(ingredients), 6),
-                             "missingIngredientPenalty": round(0.2 * len(missing) / len(ingredients), 6), "variety": 0.0}
+                             "missingIngredientPenalty": round(0.2 * len(missing) / len(ingredients) + 0.3 * len(missing_named) / max(1, len(named)), 6), "variety": 0.0}
                 score = round(max(0, min(1, breakdown["expiringIngredient"] + breakdown["inventoryCoverage"] - breakdown["missingIngredientPenalty"])), 6)
                 data = recipe.model_dump(mode="json", exclude={"status"})
                 data.update(score=score, scoreBreakdown=breakdown, usesInventory=[ingredients[name] for name in sorted(used)],
@@ -105,7 +108,7 @@ class RecipeService:
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=result, generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           mealPlan=plan.model_dump() if plan else {}, warnings=list(dict.fromkeys(planner.warnings)),
-                                          trace={"model": planner.model, "promptVersion": PROMPT_VERSION if planner.calls else None,
+                                          trace={"policyVersion": "recipe-meal-plan-v3", "model": planner.model, "promptVersion": PROMPT_VERSION if planner.calls else None,
                                                  "aiCalls": planner.calls, "searchCount": searches, "candidateCount": len(ranked)})
 
         result = await self.cache.get_or_load(key, load)

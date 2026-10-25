@@ -12,6 +12,14 @@ def canonical(name: str) -> str:
     return ALIASES.get(normalized, normalized)
 
 
+# 제목에 실제로 명시된 원문 재료 중 없는 재료만 찾는다. 모든 주재료를 식별한다는 뜻은 아니다.
+def missing_named_ingredients(name: str, ingredient_names: list[str], missing_names: list[str]) -> list[str]:
+    title = canonical(name)
+    missing = {canonical(value) for value in missing_names}
+    # '무'→'무침'처럼 한 글자 부분 문자열이 다른 단어에 걸리는 오탐을 피한다.
+    return [value for value in ingredient_names if canonical(value) in missing and any(len(alias) >= 2 and alias in title for alias in variants([value]))]
+
+
 # DB 문자열 검색용 이름 집합을 정확 이름과 검토된 별칭으로 확장한다.
 def variants(names: list[str]) -> list[str]:
     wanted = {canonical(name) for name in names}

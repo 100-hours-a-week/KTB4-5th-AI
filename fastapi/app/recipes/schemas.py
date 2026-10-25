@@ -62,7 +62,7 @@ class RecommendationRequest(Contract):
     recommendationMode: Literal["INCLUDE_EXPIRED", "EXCLUDE_EXPIRED"] = "EXCLUDE_EXPIRED"
     inventory: list[InventoryItem] = Field(max_length=300)
     excludedIngredientNames: list[Text] = Field(default_factory=list, max_length=100)
-    limit: int = Field(default=5, ge=1, le=20)
+    limit: int = Field(default=10, ge=1, le=20)
     targetServings: int = Field(default=2, ge=1, le=12, strict=True)
     strategies: list[Strategy] = Field(default_factory=lambda: ["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"], min_length=1, max_length=3)
     # 냉장고 재고와 분리한, 호출자가 명시적으로 보유를 확인한 기본 양념. 분량은 보증하지 않는다.
@@ -179,7 +179,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-meal-plan-v2"
+    policyVersion: str = "recipe-meal-plan-v3"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0

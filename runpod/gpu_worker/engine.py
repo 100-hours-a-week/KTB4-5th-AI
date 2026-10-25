@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import io
 import logging
+import math
 from pathlib import Path
 from time import perf_counter
 
@@ -63,8 +64,17 @@ class GpuInferenceEngine:
     async def reason_recipe(self, request: RecipeAiRequest) -> RecipeAiResponse:
         if not self._settings.worker_enable_llm:
             raise ModelUnavailable("레시피 판단 모델이 비활성화돼 있습니다.")
-        async with self._inference_semaphore, self._llm_semaphore:
-            return await self._recipe_reasoner.reason(request)
+        budget = request.context.get("executionBudgetSeconds", 45)
+        if type(budget) not in (int, float) or not math.isfinite(budget) or not 0 < budget <= 60:
+            raise ModelUnavailable("레시피 실행 시간 예산이 올바르지 않습니다.")
+        started = perf_counter()
+        try:
+            async with asyncio.timeout(budget), self._inference_semaphore, self._llm_semaphore:
+                logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter() - started) * 1000)
+                return await self._recipe_reasoner.reason(request)
+        except TimeoutError as exc:
+            logger.warning("recipe_ai_budget_exceeded stage=%s budget_seconds=%.1f", request.stage, budget)
+            raise ModelUnavailable("레시피 판단 시간 예산을 초과했습니다.") from exc
 
     # 이미지 URL을 한 번 내려받아 입력 유형·OCR·식품행 모델 후보를 한 응답으로 반환한다.
     async def infer(self, request: RemoteInferenceRequest) -> RemoteInferenceResponse:

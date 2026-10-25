@@ -2,7 +2,7 @@
 
 ## 역할
 
-백엔드가 소유권을 검증한 확정 재고를 전달하면 캐시를 확인하고, miss일 때 RunPod Gemma 계획 → AI PostgreSQL 원천 검색 → 코드 분량 계산 → Gemma 후보 선택 → 코드 검증을 수행한다. AI 장애는 RULE_FALLBACK으로 구분한다. 사진 분석 큐나 백엔드 MySQL 재고는 수정하지 않는다. 현행 v2 정책은 [AI 재고 활용 추천](recipe_ai_recommendations.md)을 기준으로 한다.
+백엔드가 소유권을 검증한 확정 재고를 전달하면 캐시를 확인하고, miss일 때 RunPod Gemma 계획 → AI PostgreSQL 원천 검색 → 코드 분량 계산 → Gemma 후보 선택 → 코드 검증을 수행한다. AI 장애는 RULE_FALLBACK으로 구분한다. 사진 분석 큐나 백엔드 MySQL 재고는 수정하지 않는다. 현행 v3 정책은 [AI 재고 활용 추천](recipe_ai_recommendations.md)을 기준으로 한다.
 
 - `app/recipes/schemas.py`: 재고·원천 스냅샷·단위·정렬 검증
 - `app/recipes/service.py`: 소비기한 필터, 제외 재료 필터, 점수·캐시
@@ -17,7 +17,7 @@
 
 두 API 모두 기존 `X-Internal-API-Key`를 사용한다.
 
-- `POST /ai/v1/recipe-recommendations`: 동기 응답, HTTP 200. 재고 형식·fingerprint 오류 400, 인증 오류 401, DB·원천 의존성 오류 503.
+- `POST /ai/v1/recipe-recommendations`: 동기 응답, HTTP 200. 기본 limit=10이며 적합 후보가 부족하면 더 적게 반환한다. 전략이 다른 같은 원천 레시피도 한 번만 반환한다. 명시적인 limit은 1~20을 허용한다. 재고 형식·fingerprint 오류 400, 인증 오류 401, DB·원천 의존성 오류 503.
 - `GET /ai/v1/recipe-sync/changes`: HTTP 200. 최초 cursor 생략, 기본 limit=100, 범위 1~500. `items`, `nextCursor`, `hasMore` 반환. 잘못된 cursor는 400.
 
 백엔드가 MySQL 부모·재료·단계를 한 트랜잭션으로 반영한 후에만 nextCursor를 저장한다. `(source, sourceRecipeId)`와 `sourceRevision`으로 멱등 처리한다. 변경 이력은 append-only이며 ACTIVE/INACTIVE 스냅샷 모두 전달한다. 일시적으로 검색되지 않았다는 이유로 INACTIVE 처리하지 않는다. 비활성화는 검증된 원천 상태 변경을 repository에 저장할 때만 발생한다.
