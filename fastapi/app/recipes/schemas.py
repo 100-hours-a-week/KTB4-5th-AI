@@ -147,6 +147,7 @@ class IngredientRequirement(Contract):
     unit: Literal["EA", "G", "ML"] | None
     allocatedAmount: float | None
     shortageAmount: float | None
+    # PANTRY_UNVERIFIED는 기본 가용 물 또는 명시된 양념의 분량 미확인도 포함한다.
     status: Literal["SUFFICIENT", "SHORTAGE", "UNKNOWN_AMOUNT", "UNIT_MISMATCH", "PANTRY_UNVERIFIED"]
 
 
@@ -179,7 +180,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v4"
+    policyVersion: str = "recipe-rerank-v5"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0

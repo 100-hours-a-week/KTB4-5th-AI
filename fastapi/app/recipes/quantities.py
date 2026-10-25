@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from app.recipes.retrieval import canonical
 from app.recipes.schemas import InventoryItem, Recipe
+from app.recipes.suitability import WATER_NAMES
 
 
 # 레시피 하나를 선택했을 때의 독립 가상 배분이다. 실제 재고 차감이나 여러 요리 동시 배분이 아니다.
@@ -34,7 +35,8 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
             row["status"] = "SUFFICIENT" if allocated >= required else "SHORTAGE"
             if not usable and matched:
                 row["status"] = "UNIT_MISMATCH"
-        if canonical(ingredient.name) in pantry_names and not matched:
+        # 물은 기본 가용이지만 보유량은 확인하지 않았다. SUFFICIENT로 위조하지 않는다.
+        if canonical(ingredient.name) in pantry_names | WATER_NAMES and not matched:
             row.update(status="PANTRY_UNVERIFIED", allocatedAmount=None, shortageAmount=None)
         rows.append(row)
     status = "SHORTAGE" if any(row["status"] == "SHORTAGE" for row in rows) else "NEEDS_CHECK"

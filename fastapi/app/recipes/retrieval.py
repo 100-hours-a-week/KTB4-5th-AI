@@ -7,7 +7,27 @@ ALIASES = {"달걀": "계란", "쇠고기": "소고기", "우육": "소고기", 
 
 # 제목의 주재료 누락 경고에만 쓰는 검토된 표기 관계다. 재고 매칭·단위 환산·대체 가능성에는 쓰지 않는다.
 TITLE_INGREDIENT_TERMS = {"통오징어": "오징어", "무청시래기": "시래기", "모차렐라치즈": "치즈", "플레인요거트": "요거트"}
-TITLE_MATCH_VERSION = "title-ingredient-v2"
+TITLE_MATCH_VERSION = "title-ingredient-v3"
+
+# 계열은 제목 연결·확인 필요 안내 전용이다. 정확 보유 매칭·분량 배분에 사용하지 않는다.
+INGREDIENT_FAMILIES = {
+    "소고기": {"소고기", "쇠고기", "우육", "소고기안심", "쇠고기안심", "소고기등심", "쇠고기등심", "다진소고기", "다진쇠고기", "소고기다짐육"},
+    "돼지고기": {"돼지고기", "돈육", "돼지고기안심", "돼지고기등심", "다진돼지고기", "돼지고기다짐육", "삼겹살", "목살"},
+    "닭고기": {"닭고기", "닭가슴살", "닭다리살", "닭안심", "닭고기(가슴살)", "닭고기(안심)", "다진닭고기"},
+    "오징어": {"오징어", "통오징어", "오징어몸통", "오징어다리"},
+    "새우": {"새우", "생새우", "새우살", "칵테일새우", "깐새우"},
+    "계란": {"계란", "달걀", "계란흰자", "달걀흰자", "계란노른자", "달걀노른자"},
+    "두부": {"두부", "순두부", "연두부"},
+    "치즈": {"치즈", "모차렐라치즈", "모짜렐라치즈", "리코타치즈", "파마산치즈"},
+    "요거트": {"요거트", "플레인요거트", "그릭요거트"},
+    "시래기": {"시래기", "무청시래기", "무청시래기(삶은것)"},
+}
+FAMILY_BY_NAME = {normalize(name): family for family, names in INGREDIENT_FAMILIES.items() for name in names}
+
+
+# 검토된 계열만 반환한다. 모르는 이름의 부분 문자열·조리 상태를 추측하지 않는다.
+def ingredient_family(name: str) -> str | None:
+    return FAMILY_BY_NAME.get(normalize(name))
 
 
 # 공백·유니코드 정규화 뒤 검토된 별칭만 치환한다.
@@ -31,6 +51,9 @@ def missing_named_ingredients(name: str, ingredient_names: list[str], missing_na
         terms.add(base)
         if base in TITLE_INGREDIENT_TERMS:
             terms.add(TITLE_INGREDIENT_TERMS[base])
+        family = ingredient_family(value)
+        if family:
+            terms.update(variants([family]))
         if any(len(term) >= 2 and term in title for term in terms):
             result.append(value)
     return result

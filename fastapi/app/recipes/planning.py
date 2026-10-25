@@ -10,12 +10,13 @@ import httpx
 from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
-from app.recipes.retrieval import canonical, missing_named_ingredients
+from app.recipes.retrieval import missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
+from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v4"
+POLICY_VERSION = "recipe-rerank-v5"
 
 
 class MealRanker:
@@ -63,34 +64,37 @@ class MealRanker:
 
 
 # 주재료 누락·분량 부족·추가 구매 여부를 AI가 뒤집지 못하도록 적합성 그룹을 반환한다.
-def eligibility_tier(row: dict) -> tuple[bool, bool, bool]:
-    missing_title = missing_named_ingredients(row["name"], [i["name"] for i in row["ingredients"]], row["missingIngredients"])
-    return bool(missing_title), row["quantityStatus"] == "SHORTAGE", bool(row["missingIngredients"])
+def eligibility_tier(row: dict) -> tuple[int]:
+    return (row["_suitability"]["tier"],)
 
 
-# 양수 점수의 중복 없는 후보에 전략·검증된 사유·구매 필요 여부를 부여한다. 수치·조리문은 보존한다.
+# 미보유 주재료·미검토 누락 재료를 걸러 기본 추천을 만든다. 점수만으로 적합 후보를 제거하지 않는다.
 def build_baseline(ranked: list[dict], request: RecommendationRequest) -> list[dict]:
     rows = []
     seen = set()
     for original in ranked:
         identity = (original["source"], original["sourceRecipeId"])
-        if identity in seen or original["score"] <= 0:
+        if identity in seen:
             continue
         seen.add(identity)
         row = dict(original)
+        facts = row.get("_suitability") or assess_suitability(row, [item.name for item in request.inventory])
+        row["_suitability"] = facts
+        if facts["missingMain"] or facts["unresolvedMissing"] or not facts["hasFoodMatch"]:
+            continue
         urgent = row["usesExpiringIngredients"]
         if request.strategies == ["USE_EXPIRING"] and not urgent:
             continue
         strategy = "USE_EXPIRING" if urgent and "USE_EXPIRING" in request.strategies else "MINIMIZE_SHOPPING" if "MINIMIZE_SHOPPING" in request.strategies else "SIMPLE_COOKING"
-        named = missing_named_ingredients(row["name"], [i["name"] for i in row["ingredients"]], [i["name"] for i in row["ingredients"]])
-        missing = {canonical(name) for name in row["missingIngredients"]}
-        essential = [i["ingredientNo"] for i in row["ingredients"] if i["name"] in named]
+        essential = [item["ingredientNo"] for item in facts["ingredients"] if item["role"] == "MAIN"]
         row.update(strategy=strategy, essentialIngredientNos=essential,
-                   missingEssentialIngredientNos=[i["ingredientNo"] for i in row["ingredients"] if i["ingredientNo"] in essential and canonical(i["name"]) in missing])
-        row["feasibility"] = "NEEDS_SHOPPING" if missing or row["quantityStatus"] == "SHORTAGE" else "QUANTITY_VERIFIED" if row["quantityStatus"] == "SUFFICIENT" else "NEEDS_CHECK"
+                   missingEssentialIngredientNos=[item["ingredientNo"] for item in facts["ingredients"] if item["role"] == "MAIN" and item["missing"]])
+        row["feasibility"] = "NEEDS_SHOPPING" if row["missingIngredients"] or row["quantityStatus"] == "SHORTAGE" else "QUANTITY_VERIFIED" if row["quantityStatus"] == "SUFFICIENT" else "NEEDS_CHECK"
         urgent_text = f"3일 이내 소비기한 재료 {', '.join(urgent)}가 원문에 포함됩니다." if urgent else "이 레시피에 사용되는 임박 재료는 없습니다."
         missing_title = missing_named_ingredients(row["name"], [i["name"] for i in row["ingredients"]], row["missingIngredients"])
         warning = f" 제목에 명시된 미보유 재료: {', '.join(missing_title)}." if missing_title else ""
+        if facts["relatedMain"]:
+            warning += " 같은 계열 재고가 있지만 부위·가공 상태가 같다고 확정할 수 없어 정확한 재료와 필요량을 확인해야 합니다."
         row["reason"] = (f"보유 재료 {len(row['usesInventory'])}종 사용, 추가로 확인할 재료 {len(row['missingIngredients'])}종입니다. "
                          f"{urgent_text} 원문 조리 {len(row['steps'])}단계이며 분량 상태는 {row['quantityStatus']}입니다.{warning}")
         rows.append(row)
@@ -104,16 +108,20 @@ def compact_candidates(shortlist: list[dict], brief: bool = False) -> list[dict]
     result = []
     for index, row in enumerate(shortlist, 1):
         requirements = {r["ingredientNo"]: r for r in row["ingredientRequirements"]}
+        roles = {item["ingredientNo"]: item for item in row["_suitability"]["ingredients"]}
         ingredients = []
         for item in row["ingredients"]:
             requirement = requirements.get(item["ingredientNo"], {})
             keys = ("status",) if brief else ("requiredAmount", "unit", "shortageAmount", "status")
-            ingredients.append({"ingredientNo": item["ingredientNo"], "name": item["name"],
+            role = roles[item["ingredientNo"]]
+            ingredients.append({"ingredientNo": item["ingredientNo"], "name": item["name"], "role": role["role"], "roleEvidence": role["roleEvidence"],
+                                "relatedStockNames": role["relatedStockNames"],
                                 **{key: requirement[key] for key in keys if requirement.get(key) is not None}})
         result.append({"candidateId": index, "name": row["name"], "ingredients": ingredients,
                        "usesInventory": row["usesInventory"], "usesExpiringIngredients": row["usesExpiringIngredients"],
                        "missingIngredients": row["missingIngredients"], "quantityStatus": row["quantityStatus"],
                        "missingNamedIngredients": missing_named_ingredients(row["name"], [i["name"] for i in row["ingredients"]], row["missingIngredients"]),
+                       "eligibilityTier": row["_suitability"]["tier"],
                        "stepCount": len(row["steps"]), "steps": [] if brief else [step["instruction"][:100] for step in row["steps"][:2]],
                        "detailsReduced": brief, "stepsMayBeTruncated": brief or len(row["steps"]) > 2 or any(len(step["instruction"]) > 100 for step in row["steps"])})
     return result
