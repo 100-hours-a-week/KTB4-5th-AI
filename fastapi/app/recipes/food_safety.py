@@ -9,7 +9,7 @@ from urllib.request import urlopen
 from app.config import Settings
 from app.errors import DependencyUnavailable
 from app.recipes.ingredients import parse_ingredients
-from app.recipes.retrieval import variants
+from app.recipes.retrieval import canonical
 from app.recipes.schemas import Recipe, Step
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ class FoodSafetyProvider:
         if not self.settings.recipe_food_safety_api_key or not self.settings.recipe_food_safety_storage_approved:
             raise DependencyUnavailable("DB에 추천 후보가 없습니다. 식품안전나라 키와 원문 저장 승인 설정이 필요합니다.")
         results = {}
-        # 호출 상한은 유지하면서 입력 표기와 검토된 별칭을 함께 검색한다.
-        queries = list(dict.fromkeys(term for name in names for term in [name, *variants([name])]))[:3]
+        # 동일 재료의 별칭으로 세 검색 슬롯을 소모하지 않도록 서로 다른 재료를 우선한다.
+        queries = list(dict.fromkeys(canonical(name) for name in names))[:3]
         try:
             async with asyncio.timeout(30), self._lock:
                 for name in queries:

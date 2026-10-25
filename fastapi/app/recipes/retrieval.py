@@ -11,9 +11,9 @@ TITLE_MATCH_VERSION = "title-ingredient-v3"
 
 # 계열은 제목 연결·확인 필요 안내 전용이다. 정확 보유 매칭·분량 배분에 사용하지 않는다.
 INGREDIENT_FAMILIES = {
-    "소고기": {"소고기", "쇠고기", "우육", "소고기안심", "쇠고기안심", "소고기등심", "쇠고기등심", "다진소고기", "다진쇠고기", "소고기다짐육"},
+    "소고기": {"소고기", "쇠고기", "우육", "소고기안심", "쇠고기안심", "소고기등심", "쇠고기등심", "다진소고기", "다진쇠고기", "소고기다짐육", "우삼겹", "다진쇠고기등심"},
     "돼지고기": {"돼지고기", "돈육", "돼지고기안심", "돼지고기등심", "다진돼지고기", "돼지고기다짐육", "삼겹살", "목살"},
-    "닭고기": {"닭고기", "닭가슴살", "닭다리살", "닭안심", "닭고기(가슴살)", "닭고기(안심)", "다진닭고기"},
+    "닭고기": {"닭고기", "닭가슴살", "닭다리살", "닭안심", "닭고기(가슴살)", "닭고기(안심)", "다진닭고기", "닭날개", "닭봉", "닭윙"},
     "오징어": {"오징어", "통오징어", "오징어몸통", "오징어다리"},
     "새우": {"새우", "생새우", "새우살", "칵테일새우", "깐새우"},
     "계란": {"계란", "달걀", "계란흰자", "달걀흰자", "계란노른자", "달걀노른자"},
@@ -21,6 +21,7 @@ INGREDIENT_FAMILIES = {
     "치즈": {"치즈", "모차렐라치즈", "모짜렐라치즈", "리코타치즈", "파마산치즈"},
     "요거트": {"요거트", "플레인요거트", "그릭요거트"},
     "시래기": {"시래기", "무청시래기", "무청시래기(삶은것)"},
+    "버섯": {"버섯", "표고버섯", "팽이버섯", "느타리버섯", "새송이버섯", "양송이버섯", "송이버섯"},
 }
 FAMILY_BY_NAME = {normalize(name): family for family, names in INGREDIENT_FAMILIES.items() for name in names}
 
@@ -63,6 +64,12 @@ def missing_named_ingredients(name: str, ingredient_names: list[str], missing_na
 def variants(names: list[str]) -> list[str]:
     wanted = {canonical(name) for name in names}
     return sorted(wanted | {normalize(name) for name in names} | {name for name, target in ALIASES.items() if target in wanted})
+
+
+# 검색 범위만 계열로 넓힌다. 보유·사용·분량 계산은 canonical 정확 매칭을 유지한다.
+def query_variants(names: list[str]) -> list[str]:
+    families = {ingredient_family(name) for name in names} - {None}
+    return sorted(set(variants(names)) | {normalize(name) for family in families for name in INGREDIENT_FAMILIES[family]})
 
 
 # 원문·별칭의 부분 문자열을 함께 검사한다. 계란 제외가 달걀노른자를 놓치지 않도록 한다.

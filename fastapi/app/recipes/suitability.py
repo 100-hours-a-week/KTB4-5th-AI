@@ -20,7 +20,10 @@ MAIN_NAMES = {
     "양배추", "배추", "배추김치", "김치", "브로콜리", "애호박", "오이", "무", "버섯", "표고버섯", "팽이버섯", "시금치", "토마토", "방울토마토",
     "사과", "배", "딸기", "바나나", "과일", "연어", "참치", "고등어", "대구", "명태", "홍합", "조개", "굴", "전복", "게", "소고기", "돼지고기", "닭고기", "오징어", "새우",
     "적양배추", "단호박", "밀가루", "강력분", "중력분", "박력분", "식빵", "쌀가루", "멥쌀", "한천", "호두", "아몬드", "포도", "생크림", "버터",
+    "양상추", "블루베리", "메추리알", "홍시", "찹쌀", "들깨가루", "미역줄기", "햄", "베이컨", "소시지", "돈육", "통조림햄",
 }
+# 원문의 괄호·수식어 속에 명시된 핵심 식재료도 부재 여부를 검증한다. 보유 매칭을 확장하지 않는다.
+MAIN_COMPONENTS = {name for name in MAIN_NAMES if len(name) >= 2} | {"새우", "우삼겹", "닭가슴살", "닭다리살"}
 
 
 # 이름·제목별 정적 판정을 캐시한다. 미검토 재료를 부재료나 양념이라고 추측하지 않는다.
@@ -37,6 +40,8 @@ def ingredient_role(title: str, name: str) -> tuple[str, str]:
         return "SIDE", "REVIEWED_RULE"
     if key in MAIN_NAMES or ingredient_family(name):
         return "MAIN", "REVIEWED_RULE"
+    if any(component in key for component in MAIN_COMPONENTS):
+        return "MAIN", "REVIEWED_MAIN_COMPONENT"
     return "UNKNOWN", "UNREVIEWED"
 
 
@@ -66,4 +71,4 @@ def assess_suitability(row: dict, stock_names: list[str]) -> dict:
     # 관련 계열뿐이거나 주재료 분량이 부족한 후보는 완전 보유·단위 확인 후보보다 뒤로 보낸다.
     tier = 3 if related_main or main_shortage else 2 if missing else 0 if row["quantityStatus"] == "SUFFICIENT" else 1
     return {"ingredients": facts, "missingMain": missing_main, "unresolvedMissing": unresolved, "relatedMain": related_main,
-            "hasFoodMatch": used_food, "tier": tier}
+            "hasFoodMatch": used_food or bool(related_main), "tier": tier}
