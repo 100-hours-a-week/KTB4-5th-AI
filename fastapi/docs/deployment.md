@@ -168,7 +168,10 @@ ECS를 거쳐 CloudWatch Logs에도 쌓이므로 로그 그룹 보관기간도 1
 ## 모니터링
 
 FastAPI는 내부 인증이 적용된 `GET /metrics`에서 Prometheus 형식의 지표를 제공한다. 수집기는
-분석 API와 동일하게 `X-Internal-API-Key`를 보내야 한다. 기본 Python 프로세스 CPU·메모리 지표와
+분석 API와 동일하게 `X-Internal-API-Key`를 보내야 한다. 단, 같은 Task·호스트의 CloudWatch Agent처럼 루프백(127.0.0.1)에서 온 요청은
+커스텀 헤더를 보낼 수 없으므로 키 검사를 생략한다. CloudWatch Agent는 Histogram을 버리므로 RunPod 단계 시간과
+LLM 처리량·모델 로드 시간은 같은 값을 Summary(`dameokja_remote_worker_stage_seconds`,
+`dameokja_remote_llm_tokens_per_second`, `dameokja_remote_llm_model_load_seconds`)로도 기록한다. 기본 Python 프로세스 CPU·메모리 지표와
 함께 다음 서비스 지표를 확인할 수 있다.
 
 - 접수 결과(`accepted`, `idempotent`, `queue_full`), 현재 큐 크기와 가장 오래된 대기 시간

@@ -1,4 +1,4 @@
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, Summary, generate_latest
 
 from app.domain.models import PipelineDiagnostics
 
@@ -69,6 +69,21 @@ REMOTE_LLM_LOAD_DURATION = Histogram(
     "RunPod Ollama 모델 로드 시간",
     buckets=(0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10, 30),
 )
+# CloudWatch Agent는 Histogram을 버리고 Summary의 _sum·_count만 보내므로 같은 값을 Summary로도 기록한다.
+REMOTE_WORKER_STAGE_SECONDS = Summary(
+    "dameokja_remote_worker_stage_seconds",
+    "RunPod Worker 단계별 대기 및 처리 시간(CloudWatch 평균용)",
+    ("stage",),
+)
+REMOTE_LLM_THROUGHPUT_SUMMARY = Summary(
+    "dameokja_remote_llm_tokens_per_second",
+    "RunPod LLM 프롬프트·생성 토큰 처리량(CloudWatch 평균용)",
+    ("type",),
+)
+REMOTE_LLM_LOAD_SECONDS = Summary(
+    "dameokja_remote_llm_model_load_seconds",
+    "RunPod Ollama 모델 로드 시간(CloudWatch 평균용)",
+)
 
 _REMOTE_MILLISECOND_STAGES = {
     "worker_queue_wait_ms": "worker_queue_wait",
@@ -89,6 +104,7 @@ def observe_remote_diagnostics(diagnostics: PipelineDiagnostics) -> None:
         value = getattr(diagnostics, field_name)
         if _is_non_negative_number(value):
             REMOTE_WORKER_STAGE_DURATION.labels(stage=stage).observe(value / 1000)
+            REMOTE_WORKER_STAGE_SECONDS.labels(stage=stage).observe(value / 1000)
 
     _observe_remote_tokens(
         "prompt",
@@ -102,6 +118,7 @@ def observe_remote_diagnostics(diagnostics: PipelineDiagnostics) -> None:
     )
     if _is_non_negative_number(diagnostics.llm_load_duration_ns):
         REMOTE_LLM_LOAD_DURATION.observe(diagnostics.llm_load_duration_ns / 1_000_000_000)
+        REMOTE_LLM_LOAD_SECONDS.observe(diagnostics.llm_load_duration_ns / 1_000_000_000)
 
 
 # 토큰 수와 처리시간이 유효할 때 누적 토큰 및 초당 처리량을 기록한다.
@@ -110,7 +127,9 @@ def _observe_remote_tokens(token_type: str, tokens: object, duration_ns: object)
         return
     REMOTE_LLM_TOKENS.labels(type=token_type).inc(tokens)
     if _is_positive_number(duration_ns):
-        REMOTE_LLM_THROUGHPUT.labels(type=token_type).observe(tokens / (duration_ns / 1_000_000_000))
+        throughput = tokens / (duration_ns / 1_000_000_000)
+        REMOTE_LLM_THROUGHPUT.labels(type=token_type).observe(throughput)
+        REMOTE_LLM_THROUGHPUT_SUMMARY.labels(type=token_type).observe(throughput)
 
 
 # bool을 제외한 0 이상의 정수·실수인지 반환한다.
