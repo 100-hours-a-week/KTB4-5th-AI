@@ -1,4 +1,12 @@
-# 냉장고 레시피 추천 — 조리 가능성 분리·임박 주재료·웹 보충 정책 v8
+# 냉장고 레시피 추천 — 구매 필요 허용·임박 주재료·웹 보충 정책 v9
+
+## 부족 식재료 허용 정책
+
+보유한 식재료를 최소 하나 정확히 사용하는 레시피는 다른 주재료·부재료가 부족해도 일반 추천에 포함한다. 부족 이름은 missingIngredients에, 부족 주재료 번호는 missingEssentialIngredientNos에 보존하고 feasibility=NEEDS_SHOPPING으로 표시한다. 부족 재료를 보유·소비한 것으로 계산하거나 원문에서 삭제하지 않는다. 미검토 재료와 부위·종류 차이는 confirmationReasons로 설명한다. 정확히 보유한 식품은 없고 관련 계열 힌트만 있는 후보는 기존처럼 confirmationCandidates로 분리한다.
+
+검토된 양념·조미료 전체를 구매 필요 식재료 목록에서 제외하고 PANTRY_UNVERIFIED로 참고한다. 멸치액젓·새우젓·통깨·매실청·미소·마늘기름·현미유·카레가루 등을 포함한다. 원문 재료표·분량은 그대로 표시하며 실제 보유와 분량을 보증하지 않는다. 알 수 없는 소스를 무조건 양념으로 분류하지 않는다. 마늘구이처럼 요리 제목상 핵심 재료가 된 경우와 사용자 제외 조건은 우선한다.
+
+실제 임박 주재료 사용 → 임박 부재료 사용 → 임박 미사용 순위를 유지하며 같은 그룹에서는 재료 충족·구매 부담을 비교한다. 많이 부족한 요리를 바로 조리 가능하다고 표시하지 않으며 후보가 적으면 요청 개수를 억지로 채우지 않는다. 요청·응답 스키마와 Worker 프롬프트 계약은 유지하고 policyVersion만 recipe-rerank-v9로 변경한다. SQL은 없다.
 
 ## 상품명 재고와 운영 제한
 
@@ -39,15 +47,15 @@ DB 검색·후보 검증은 CPU FastAPI가, RANK는 기존 GPU Worker의 Gemma�
 
 ## 일반 추천과 확인 후보
 
-- recommendations: 정확히 보유한 식품이 연결되고, 명확히 없는 주재료나 역할 미검토 누락·계열 확인이 없는 후보다.
-- confirmationCandidates: 같은 계열의 종류·부위 확인 또는 미검토 누락 재료가 남은 후보다. 최대 3개이며 일반 추천과 별도로 표시한다. 필수 재료가 확실히 없는 후보는 여기에도 넣지 않는다.
+- recommendations: 정확히 보유한 식품이 하나 이상 연결되는 후보. 부족 주재료·미검토 재료도 구매 필요 목록과 확인 사유를 함께 제공한다.
+- confirmationCandidates: 정확 보유 식품은 없고 같은 계열의 종류·부위 확인 힌트만 있는 후보. 최대 3개이며 일반 추천과 별도로 표시한다.
 - 정확한 식품 연결 0개인 후보는 일반 추천에 넣지 않는다. 계열 힌트만 있는 후보는 확인 목록에서만 제공한다.
 - UNKNOWN을 양념으로 가정하지 않는다. 스파게티·미역·문어·주꾸미·가지·호박 등 확인된 핵심 식품 이름을 MAIN 규칙에 포함한다. 검토 목록은 모든 식품의 의미를 완벽히 판별하는 분류기가 아니다.
 - 일반 추천의 feasibility는 QUANTITY_VERIFIED / NEEDS_CHECK / NEEDS_SHOPPING이다. 확인 후보는 NEEDS_CHECK이며 confirmationReasons에 확인 이유를 제공한다.
 - confirmationReasons는 원문 인분 부재·재료 종류·상태·역할 확인을 설명한다. 인분 미상이라고 기본 1인분이나 2인분을 넣지 않는다.
 - recommendationEngine=EMPTY는 일반 추천이 없다는 뜻이다. confirmationCandidates가 남아 있을 수 있다.
 - 실제 수량·중량 계산은 동일 이름·검토된 별칭과 같은 EA/G/ML끼리만 수행한다. 두부↔순두부·버섯 종류·고기 부위를 대체나 수량 충족으로 확정하지 않는다.
-- 물과 소금·설탕·간장·식초·식용유 등 최소 기본 양념은 비축 가정으로 처리한다. 부족 재료에서 제외하지만 분량은 PANTRY_UNVERIFIED다. 신선 재료·젓갈·특수 소스는 자동 비축하지 않는다. 새우젓·액젓은 양념 역할로 판정한다. 제목상 MAIN과 제외 목록이 우선하며 마늘·다진파를 팬트리로 우회 공급하지 않는다.
+- 물과 검토된 양념·조미료는 비축 가정으로 처리한다. 부족 재료에서 제외하지만 분량은 PANTRY_UNVERIFIED다. 제목상 MAIN과 제외 목록이 우선하며 신선 부재료나 미검토 소스를 자동 비축하지 않는다.
 - 한 글자 제외어는 전체 일치·검토 계열만 적용하고 두 글자 이상은 기존 부분 일치를 유지한다. 배/배추, 무/단무지, 파/파프리카를 구분한다. 닭고기·소고기 같은 포괄 이름은 검토 부위에도 적용한다. 이는 알레르기 안전 보증이 아니다.
 
 ## 재료 표기 정규화
@@ -92,7 +100,7 @@ AI는 후보 전체 ID의 순열만 반환한다. 날짜·원문·재료·분량
 
 ## AI 입력과 시간·캐시
 
-- 정책 recipe-rerank-v8, 프롬프트 recipe-grounded-v3. 이번 정책 변경은 FastAPI에 적용하며 Worker 프롬프트 계약은 유지한다.
+- 정책 recipe-rerank-v9, 프롬프트 recipe-grounded-v3. 이번 정책 변경은 FastAPI에 적용하며 Worker 프롬프트 계약은 유지한다.
 - 일반 후보 기본 상한은 12개다. 공개 응답의 ingredients / steps / amountText는 전체 원문을 유지한다.
 - RANK JSON 입력 예산은 24,000바이트다. 초과하면 재료를 번호 기반 배열로 표현하고 ingredientColumns로 열 뜻을 전달한다. 보유·부족·임박 목록도 같은 원문 번호를 참조한다. 후보와 원문 재료 개수는 줄이지 않는다.
 - 압축 입력은 원문 조리 첫 2단계·각 100자와 단계 수를 보존하고 detailsReduced / stepsMayBeTruncated로 생략 여부를 알린다. 여전히 초과하면 기본 추천으로 돌아간다.
@@ -130,7 +138,7 @@ mealPlan은 빈 focusIngredientIds/ideas를 유지한다. score는 규칙 후보
 - WEB_SEARCH_UNAVAILABLE: 웹 검색 오류·시간 예산 소진, 기존 결과 유지·미캐싱.
 - WEB_SEARCH_NO_VERIFIED_RECIPE: 검색했으나 원문 검증을 통과한 레시피가 없음.
 
-AI_UNAVAILABLE_OR_INVALID, AI_ORDER_CONSTRAINED_BY_ELIGIBILITY, RULE_RESULTS_NOT_AI_JUDGEMENT, MISSING_MAIN_INGREDIENT_RECIPES_EXCLUDED, UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK 등의 기존 경고도 유지한다.
+MISSING_INGREDIENTS_REQUIRE_SHOPPING은 부족 주재료 후보가 있다는 뜻이다. 이전의 MISSING_MAIN_INGREDIENT_RECIPES_EXCLUDED는 더 이상 반환하지 않는다. AI_UNAVAILABLE_OR_INVALID, AI_ORDER_CONSTRAINED_BY_ELIGIBILITY, RULE_RESULTS_NOT_AI_JUDGEMENT, UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK는 유지한다.
 
 ## 검증 범위
 

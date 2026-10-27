@@ -180,7 +180,7 @@ class RecipeService:
             missing_main_count = sum(bool(row["_suitability"]["missingMain"]) for row in ranked)
             unresolved_count = sum(bool(row["_suitability"]["unresolvedMissing"]) for row in ranked)
             if missing_main_count:
-                ranker.warnings.append("MISSING_MAIN_INGREDIENT_RECIPES_EXCLUDED")
+                ranker.warnings.append("MISSING_INGREDIENTS_REQUIRE_SHOPPING")
             if unresolved_count:
                 ranker.warnings.append("UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK")
             shortlist = baseline[:self.settings.recipe_ai_max_candidates]

@@ -13,9 +13,12 @@ SEASONING_NAMES = {
     "피클링스파이스", "라임즙", "생강가루", "파슬리가루", "계피가루", "유자청", "매실액", "월계수잎", "통후추", "저염된장", "볶은소금", "포도씨유",
     "통마늘",
     "굵은소금", "꽃소금", "천일염", "멸치액젓", "까나리액젓", "액젓", "새우젓",
+    "매실청", "생강청", "생강즙", "콩기름", "양조식초", "감식초", "저염고추장", "미소", "일식된장미소",
+    "소주", "정종", "고추기름", "두반장", "강황가루", "간편어간장",
+    "현미유", "마늘기름", "카레가루",
 }
-# 기본 비축 가정은 최소 양념만 적용한다. 신선 재료·특수 소스·젓갈은 자동 보유로 만들지 않는다.
-DEFAULT_PANTRY_NAMES = {"소금", "굵은소금", "꽃소금", "천일염", "설탕", "후추", "후춧가루", "흑후추", "간장", "진간장", "국간장", "양조간장", "식초", "식용유", "참기름", "고춧가루", "고추가루"}
+# 검토된 양념은 구매 필요 식재료에서 제외한다. 요리 제목상 주재료이면 이 가정보다 우선한다.
+DEFAULT_PANTRY_NAMES = frozenset(SEASONING_NAMES)
 # 제목에 명시되면 MAIN이 우선한다. 양파가 원문에 있으면 적은 양이어도 임의 삭제하지 않는다.
 SIDE_NAMES = {"양파", "적양파", "당근", "대파", "쪽파", "청양고추", "홍고추", "풋고추", "고추", "피망", "파프리카", "깻잎", "파슬리", "부추",
               "적파프리카", "홍파프리카", "청파프리카", "황파프리카", "청피망", "홍피망", "셀러리줄기", "다진땅콩", "새싹채소"}
@@ -74,6 +77,6 @@ def assess_suitability(row: dict, stock_names: list[str]) -> dict:
     used_names = {canonical(name) for name in row["usesInventory"]}
     used_food = any(canonical(item["name"]) in used_names and item["role"] not in {"WATER", "SEASONING"} for item in facts)
     # 관련 계열뿐이거나 주재료 분량이 부족한 후보는 완전 보유·단위 확인 후보보다 뒤로 보낸다.
-    tier = 3 if related_main or unresolved or main_shortage else 2 if missing else 0 if row["quantityStatus"] == "SUFFICIENT" else 1
+    tier = 3 if missing_main or related_main or unresolved or main_shortage else 2 if missing else 0 if row["quantityStatus"] == "SUFFICIENT" else 1
     return {"ingredients": facts, "missingMain": missing_main, "unresolvedMissing": unresolved, "relatedMain": related_main,
             "hasFoodMatch": used_food, "hasRelatedFood": bool(related_main), "tier": tier}

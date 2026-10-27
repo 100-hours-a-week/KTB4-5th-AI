@@ -18,7 +18,7 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v8"
+POLICY_VERSION = "recipe-rerank-v9"
 
 
 # 임박·적합성 우선순위가 같은 후보 안에서만 최근 추천과 동일 주재료 반복을 뒤로 미룬다.
@@ -96,7 +96,7 @@ def eligibility_tier(row: dict) -> tuple[int, ...]:
     return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
 
 
-# 미보유 주재료를 제외하고 미검토 누락은 확인 사유로 보존한다. 실제 임박 활용을 우선한다.
+# 부족한 주재료도 구매 필요 후보로 포함한다. 정확히 보유한 식재료가 없는 계열 후보만 따로 둔다.
 def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmation_only: bool = False) -> list[dict]:
     rows = []
     seen = set()
@@ -108,12 +108,10 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
         row = dict(original)
         facts = row.get("_suitability") or assess_suitability(row, [item.name for item in request.inventory])
         row["_suitability"] = facts
-        if facts["missingMain"] or not (facts["hasFoodMatch"] or facts.get("hasRelatedFood")):
-            continue
-        uncertain = bool(facts["relatedMain"] or facts["unresolvedMissing"])
-        if uncertain != confirmation_only:
-            continue
-        if not confirmation_only and not facts["hasFoodMatch"]:
+        if confirmation_only:
+            if facts["hasFoodMatch"] or not facts.get("hasRelatedFood"):
+                continue
+        elif not facts["hasFoodMatch"]:
             continue
         urgent = row["usesExpiringIngredients"]
         urgent_main = [item["name"] for item in facts["ingredients"] if item["role"] == "MAIN" and canonical(item["name"]) in {canonical(name) for name in urgent}]
@@ -146,6 +144,8 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             warning += " 같은 계열 재고가 있지만 부위·가공 상태가 같다고 확정할 수 없어 정확한 재료와 필요량을 확인해야 합니다."
         if facts["unresolvedMissing"]:
             warning += f" 역할·보유 여부 확인 필요: {', '.join(item['name'] for item in facts['unresolvedMissing'])}. 원문 재료를 생략해도 된다는 뜻은 아닙니다."
+        if row["missingIngredients"]:
+            warning += f" 추가로 준비할 식재료: {', '.join(row['missingIngredients'])}."
         row["reason"] = (f"보유 재료 {len(row['usesInventory'])}종 사용, 추가로 확인할 재료 {len(row['missingIngredients'])}종입니다. "
                          f"{urgent_text} 원문 조리 {len(row['steps'])}단계이며 분량 상태는 {row['quantityStatus']}입니다.{warning}")
         rows.append(row)
