@@ -15,7 +15,7 @@ from app.recipes.ai_contract import PROMPT_VERSION
 from app.recipes.diagnostics import candidate_diagnostics
 from app.recipes.evaluation import compare_rankings
 from app.recipes.food_safety import FoodSafetyProvider
-from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline, diversify
+from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline, cover_expiring, diversify
 from app.recipes.quantities import assess_quantities
 from app.recipes.repository import RecipeRepository
 from app.recipes.retrieval import MATCH_VERSION, TITLE_MATCH_VERSION, allowed, canonical, is_excluded, missing_named_ingredients, query_variants
@@ -175,8 +175,6 @@ class RecipeService:
             if confirmations:
                 ranker.warnings.append("CONFIRMATION_CANDIDATES_SEPARATED")
             focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
-            if focus:
-                ranker.warnings.append("UNCOVERED_EXPIRING_INGREDIENTS")
             missing_main_count = sum(bool(row["_suitability"]["missingMain"]) for row in ranked)
             unresolved_count = sum(bool(row["_suitability"]["unresolvedMissing"]) for row in ranked)
             if missing_main_count:
@@ -204,8 +202,13 @@ class RecipeService:
                 ranker.warnings.append("EXPIRED_INVENTORY_INCLUDED_NOT_SAFETY_APPROVAL")
             # AI가 정렬한 앞부분 뒤에 검증된 기본 후보를 보존한다. 범위를 경고로 명시한다.
             ordered = (selected + baseline[len(shortlist):]) if selected is not None else baseline
-            result = diversify(ordered, request.recentRecipeIds)[:request.limit]
-            if selected is not None and len(result) > len(shortlist):
+            result = cover_expiring(diversify(ordered, request.recentRecipeIds), matched_request)[:request.limit]
+            # 외부 검색용 전체 후보 판정과 달리 응답은 최종 반환한 목록의 활용만 보고한다.
+            focus = uncovered(result) if "USE_EXPIRING" in request.strategies else []
+            if focus:
+                ranker.warnings.append("UNCOVERED_EXPIRING_INGREDIENTS")
+            ai_identities = {(row["source"], row["sourceRecipeId"]) for row in shortlist}
+            if selected is not None and any((row["source"], row["sourceRecipeId"]) not in ai_identities for row in result):
                 ranker.warnings.append("AI_RANKED_PREFIX_ONLY")
             if set(request.strategies) - {row["strategy"] for row in result} and result:
                 ranker.warnings.append("PARTIAL_STRATEGY_COVERAGE")

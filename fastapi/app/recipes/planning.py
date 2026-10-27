@@ -18,7 +18,33 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v9"
+POLICY_VERSION = "recipe-rerank-v10"
+
+
+# 같은 임박 활용·적합성 그룹에서 구매 부담이 최소 후보보다 2종 이내인 새 임박 주재료를 먼저 확보한다.
+def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dict]:
+    if "USE_EXPIRING" not in request.strategies:
+        return rows
+    dates = {canonical(item.name): item.expirationDate for item in request.inventory}
+    pending, selected, covered = list(rows), [], set()
+    while pending and len(selected) < request.limit:
+        best = min(eligibility_tier(row)[:2] for row in pending)
+        group = [row for row in pending if eligibility_tier(row)[:2] == best]
+        minimum_missing = min(len(row["missingIngredients"]) for row in group)
+        fresh = [(row, {canonical(name) for name in row["usesExpiringMainIngredients"]} - covered) for row in group
+                 if len(row["missingIngredients"]) <= minimum_missing + 2]
+        fresh = [(row, names) for row, names in fresh if names]
+        if fresh:
+            # 날짜·새로운 임박 재료 수·구매 부담이 같으면 기존 AI/기본 순서를 유지한다.
+            row, newly_used = min(fresh, key=lambda pair: (min(dates[name] for name in pair[1]), -len(pair[1]), len(pair[0]["missingIngredients"])))
+            row = dict(row)
+            row["reason"] += f" 임박 재료 분산 활용: {', '.join(sorted(newly_used))}를 앞선 추천과 추가로 활용하도록 선정했습니다."
+        else:
+            row = group[0]
+        selected.append(row)
+        covered.update(canonical(name) for name in row["usesExpiringMainIngredients"])
+        pending.remove(next(item for item in pending if (item["source"], item["sourceRecipeId"]) == (row["source"], row["sourceRecipeId"])))
+    return selected
 
 
 # 임박·적합성 우선순위가 같은 후보 안에서만 최근 추천과 동일 주재료 반복을 뒤로 미룬다.
