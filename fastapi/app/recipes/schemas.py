@@ -25,6 +25,7 @@ class Contract(BaseModel):
 class InventoryItem(Contract):
     ingredientId: int = Field(gt=0)
     name: Text
+    ingredientKey: Text | None = None
     category: Category
     storageType: Literal["REFRIGERATED", "FROZEN"]
     measureType: Literal["COUNT", "WEIGHT"]
@@ -50,6 +51,10 @@ def inventory_fingerprint(items: list[InventoryItem]) -> str:
     rows = []
     for item in sorted(items, key=lambda item: item.ingredientId):
         row = item.model_dump(mode="json")
+        if item.ingredientKey is None:
+            row.pop("ingredientKey")
+        else:
+            row["ingredientKey"] = normalize(item.ingredientKey)
         row["name"] = normalize(item.name)
         rows.append(row)
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -67,6 +72,8 @@ class RecommendationRequest(Contract):
     strategies: list[Strategy] = Field(default_factory=lambda: ["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"], min_length=1, max_length=3)
     # 냉장고 재고와 분리한, 호출자가 명시적으로 보유를 확인한 기본 양념. 분량은 보증하지 않는다.
     pantryIngredientNames: list[Text] = Field(default_factory=list, max_length=30)
+    # 원천 간 ID 충돌을 막기 위해 SOURCE:sourceRecipeId 형식으로 전달한다.
+    recentRecipeIds: list[Text] = Field(default_factory=list, max_length=100)
 
     # 중복 재고 ID와 정규화 재고 fingerprint 일치 여부를 확인한다.
     @model_validator(mode="after")
@@ -183,7 +190,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v7"
+    policyVersion: str = "recipe-rerank-v8"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0

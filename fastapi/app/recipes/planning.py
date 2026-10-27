@@ -18,7 +18,29 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v7"
+POLICY_VERSION = "recipe-rerank-v8"
+
+
+# 임박·적합성 우선순위가 같은 후보 안에서만 최근 추천과 동일 주재료 반복을 뒤로 미룬다.
+def diversify(rows: list[dict], recent_ids: list[str]) -> list[dict]:
+    pending, result, seen_main = list(rows), [], set()
+    recent = set(recent_ids)
+    while pending:
+        priority = min(eligibility_tier(row) for row in pending)
+        candidates = [row for row in pending if eligibility_tier(row) == priority]
+        def penalty(row: dict) -> tuple[int, int]:
+            main = frozenset(canonical(item["name"]) for item in row["_suitability"]["ingredients"] if item["role"] == "MAIN")
+            return (int(f"{row['source']}:{row['sourceRecipeId']}" in recent), int(bool(main) and main in seen_main))
+        selected = min(candidates, key=penalty)
+        selected = dict(selected)
+        repeated, duplicate = penalty(selected)
+        selected["scoreBreakdown"] = {**selected["scoreBreakdown"], "variety": 0.0 if repeated or duplicate else 1.0}
+        if repeated or duplicate:
+            selected["reason"] += " 같은 임박·적합성 조건에서 최근 추천 또는 주재료 중복을 고려했습니다."
+        result.append(selected)
+        seen_main.add(frozenset(canonical(item["name"]) for item in selected["_suitability"]["ingredients"] if item["role"] == "MAIN"))
+        pending.remove(next(row for row in pending if row["source"] == selected["source"] and row["sourceRecipeId"] == selected["sourceRecipeId"]))
+    return result
 
 
 class MealRanker:
@@ -28,6 +50,7 @@ class MealRanker:
         self.expected_model = expected_model
         self.model: str | None = None
         self.calls = 0
+        self.unavailable = False
         self.warnings: list[str] = []
 
     # 후보 전체의 ID 순열만 수용한다. 오류·누락·중복은 기본 추천을 지우지 않고 None으로 반환한다.
@@ -59,6 +82,7 @@ class MealRanker:
             self.model = model
             return constrained
         except AI_ERRORS as exc:
+            self.unavailable = isinstance(exc, (AppError, httpx.HTTPError, TimeoutError))
             allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION"}
             code = str(exc) if type(exc) is ValueError and str(exc) in allowed else "TIME_BUDGET_EXCEEDED" if isinstance(exc, TimeoutError) else "REMOTE_OR_SCHEMA_ERROR"
             logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s prompt=%s", type(exc).__name__, code, PROMPT_VERSION)

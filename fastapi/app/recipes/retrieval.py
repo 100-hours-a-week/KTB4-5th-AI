@@ -1,9 +1,21 @@
 """추천 재료 별칭과 제외 조건. 벡터 병합은 비교 실험에서만 사용한다."""
 
+import re
+
 from app.recipes.schemas import Recipe, normalize
 
 # 명시적 동의어만 사용한다. 순두부/두부, 우유/두유처럼 대체 가능성을 추측하지 않는다.
-ALIASES = {"달걀": "계란", "쇠고기": "소고기", "우육": "소고기", "돈육": "돼지고기", "무우": "무", "브로컬리": "브로콜리"}
+ALIASES = {
+    "달걀": "계란", "쇠고기": "소고기", "우육": "소고기", "돈육": "돼지고기", "무우": "무", "브로컬리": "브로콜리",
+    "양송이": "양송이버섯", "모짜렐라치즈": "모차렐라치즈", "올리브오일": "올리브유",
+    "빨강파프리카": "홍파프리카", "빨간파프리카": "홍파프리카", "노랑파프리카": "황파프리카", "노란파프리카": "황파프리카",
+    "양파다진것": "다진양파", "당근다진것": "다진당근", "파다진것": "다진파",
+    "청피망다진것": "다진청피망", "홍피망다진것": "다진홍피망", "마늘다진것": "다진마늘",
+}
+MATCH_VERSION = "recipe-ingredient-v3"
+# 수집 원문의 용도 표제만 제거한다. 부위·가열·냉동·품종을 나타내는 괄호는 유지한다.
+SECTION_LABELS = ("반죽재료", "속재료", "소스", "토핑재료", "토핑", "비스킷재료", "아몬드우유")
+SECTION_PREFIX = re.compile(r"^\((?:" + "|".join(SECTION_LABELS) + r")\)(?=.)")
 
 # 제목의 주재료 누락 경고에만 쓰는 검토된 표기 관계다. 재고 매칭·단위 환산·대체 가능성에는 쓰지 않는다.
 TITLE_INGREDIENT_TERMS = {"통오징어": "오징어", "무청시래기": "시래기", "모차렐라치즈": "치즈", "플레인요거트": "요거트"}
@@ -30,12 +42,12 @@ FAMILY_BY_NAME = {normalize(name): family for family, names in INGREDIENT_FAMILI
 
 # 검토된 계열만 반환한다. 모르는 이름의 부분 문자열·조리 상태를 추측하지 않는다.
 def ingredient_family(name: str) -> str | None:
-    return FAMILY_BY_NAME.get(normalize(name))
+    return FAMILY_BY_NAME.get(canonical(name))
 
 
-# 공백·유니코드 정규화 뒤 검토된 별칭만 치환한다.
+# 공백·유니코드와 검토된 용도 표제를 정규화한 뒤 같은 재료의 별칭만 치환한다.
 def canonical(name: str) -> str:
-    normalized = normalize(name)
+    normalized = SECTION_PREFIX.sub("", normalize(name), count=1)
     return ALIASES.get(normalized, normalized)
 
 
@@ -71,7 +83,9 @@ def variants(names: list[str]) -> list[str]:
 # 검색 범위만 계열로 넓힌다. 보유·사용·분량 계산은 canonical 정확 매칭을 유지한다.
 def query_variants(names: list[str]) -> list[str]:
     families = {ingredient_family(name) for name in names} - {None}
-    return sorted(set(variants(names)) | {normalize(name) for family in families for name in INGREDIENT_FAMILIES[family]})
+    values = set(variants(names)) | {normalize(name) for family in families for name in INGREDIENT_FAMILIES[family]}
+    # 기존 DB의 ingredient_names는 원문 이름을 유지한다. 원문을 덮어쓰지 않고 조회 표현을 확장한다.
+    return sorted(values | {f"({label}){value}" for value in values for label in SECTION_LABELS})
 
 
 # 원문·별칭의 부분 문자열을 함께 검사한다. 계란 제외가 달걀노른자를 놓치지 않도록 한다.
@@ -81,7 +95,8 @@ def is_excluded(name: str, excluded: list[str]) -> bool:
         family = ingredient_family(value)
         if family and canonical(value) == canonical(family):
             exclusions.extend(normalize(member) for member in INGREDIENT_FAMILIES[family])
-    return any(exclusion in candidate for candidate in {normalize(name), canonical(name)} for exclusion in exclusions)
+    return any(exclusion == candidate or (len(exclusion) >= 2 and exclusion in candidate)
+               for candidate in {normalize(name), canonical(name)} for exclusion in exclusions)
 
 
 # 후보가 요청 재료를 실제로 포함하고 제외 재료를 포함하지 않는지 문자열·별칭으로 재검증한다.

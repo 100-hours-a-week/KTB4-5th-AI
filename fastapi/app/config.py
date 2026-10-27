@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     recipe_ai_timeout_seconds: float = Field(default=45, ge=1, le=120)
     recipe_ai_max_candidates: int = Field(default=12, ge=3, le=20)
     recipe_food_safety_api_key: str | None = Field(default=None, repr=False)
+    recipe_korean_archive_api_key: str | None = Field(default=None, repr=False)
     # 원문 저장·재배포 조건을 확인한 운영자만 활성화한다. 키만 넣어도 자동으로 켜지지 않는다.
     recipe_food_safety_storage_approved: bool = False
     recipe_tavily_api_key: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("TAVILY_API_KEY", "RECIPE_TAVILY_API_KEY", "recipe_tavily_api_key"))
