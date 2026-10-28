@@ -16,6 +16,8 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
         available[item.ingredientId] = Decimal(str(item.quantity if item.measureType == "COUNT" else item.weightValue))
         remaining[item.ingredientId] = available[item.ingredientId]
     rows = []
+    allocations: dict[int, list[dict]] = {item.ingredientId: [] for item in inventory}
+    unresolved: set[int] = set()
     for ingredient in recipe.ingredients:
         matched = sorted([item for item in inventory if canonical(item.name) == canonical(ingredient.name)], key=lambda item: (item.expirationDate, item.ingredientId))
         required = None
@@ -31,6 +33,8 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
                 amount = min(required - allocated, remaining[item.ingredientId])
                 remaining[item.ingredientId] -= amount
                 allocated += amount
+                if amount > 0:
+                    allocations[item.ingredientId].append({"ingredientNo": ingredient.ingredientNo, "usedAmount": float(amount)})
             row.update(allocatedAmount=float(allocated), shortageAmount=float(required - allocated))
             row["status"] = "SUFFICIENT" if allocated >= required else "SHORTAGE"
             if not usable and matched:
@@ -38,11 +42,16 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
         # 물은 기본 가용이지만 보유량은 확인하지 않았다. SUFFICIENT로 위조하지 않는다.
         if canonical(ingredient.name) in pantry_names | WATER_NAMES and not matched:
             row.update(status="PANTRY_UNVERIFIED", allocatedAmount=None, shortageAmount=None)
+        if row["status"] in {"UNKNOWN_AMOUNT", "UNIT_MISMATCH"}:
+            unresolved.update(item.ingredientId for item in matched)
         rows.append(row)
-    status = "SHORTAGE" if any(row["status"] == "SHORTAGE" for row in rows) else "NEEDS_CHECK"
-    if all(row["status"] == "SUFFICIENT" for row in rows):
+    # 양념/물의 보유량 미확인은 식재료 분량 판정을 막지 않으며 개별 원문 상태는 보존한다.
+    food_rows = [row for row in rows if row["status"] != "PANTRY_UNVERIFIED"]
+    status = "SHORTAGE" if any(row["status"] == "SHORTAGE" for row in food_rows) else "NEEDS_CHECK"
+    if food_rows and all(row["status"] == "SUFFICIENT" for row in food_rows):
         status = "SUFFICIENT"
     usage = [{"ingredientId": item.ingredientId, "name": item.name, "unit": units[item.ingredientId],
               "availableAmount": float(available[item.ingredientId]), "usedAmount": float(available[item.ingredientId] - remaining[item.ingredientId]),
-              "remainingAmount": float(remaining[item.ingredientId])} for item in inventory]
+              "remainingAmount": float(remaining[item.ingredientId]), "allocations": allocations[item.ingredientId],
+              "allocationStatus": "UNRESOLVED" if item.ingredientId in unresolved else "CALCULATED" if allocations[item.ingredientId] else "UNUSED"} for item in inventory]
     return {"targetServings": servings, "quantityStatus": status, "ingredientRequirements": rows, "inventoryUsage": usage}

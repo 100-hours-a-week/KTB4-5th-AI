@@ -12,20 +12,27 @@ import httpx
 from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
+from app.recipes.context import variation_key
 from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
 from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v10"
+POLICY_VERSION = "recipe-rerank-v11"
 
 
 # 같은 임박 활용·적합성 그룹에서 구매 부담이 최소 후보보다 2종 이내인 새 임박 주재료를 먼저 확보한다.
 def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dict]:
     if "USE_EXPIRING" not in request.strategies:
         return rows
-    dates = {canonical(item.name): item.expirationDate for item in request.inventory}
+    dates = {}
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    for item in request.inventory:
+        if not 0 <= (item.expirationDate - today).days <= 3:
+            continue
+        name = canonical(item.name)
+        dates[name] = min(dates.get(name, item.expirationDate), item.expirationDate)
     pending, selected, covered = list(rows), [], set()
     while pending and len(selected) < request.limit:
         best = min(eligibility_tier(row)[:2] for row in pending)
@@ -36,11 +43,14 @@ def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dic
         fresh = [(row, names) for row, names in fresh if names]
         if fresh:
             # 날짜·새로운 임박 재료 수·구매 부담이 같으면 기존 AI/기본 순서를 유지한다.
-            row, newly_used = min(fresh, key=lambda pair: (min(dates[name] for name in pair[1]), -len(pair[1]), len(pair[0]["missingIngredients"])))
+            row, newly_used = min(fresh, key=lambda pair: (min(dates[name] for name in pair[1]), -len(pair[1]),
+                                                          0 if pair[0].get("preferenceMatch") == "MATCHED" else 1,
+                                                          len(pair[0]["missingIngredients"])))
             row = dict(row)
             row["reason"] += f" 임박 재료 분산 활용: {', '.join(sorted(newly_used))}를 앞선 추천과 추가로 활용하도록 선정했습니다."
         else:
-            row = group[0]
+            affordable = [row for row in group if len(row["missingIngredients"]) <= minimum_missing + 2]
+            row = min(affordable, key=lambda row: 0 if row.get("preferenceMatch") == "MATCHED" else 1)
         selected.append(row)
         covered.update(canonical(name) for name in row["usesExpiringMainIngredients"])
         pending.remove(next(item for item in pending if (item["source"], item["sourceRecipeId"]) == (row["source"], row["sourceRecipeId"])))
@@ -78,9 +88,12 @@ class MealRanker:
         self.calls = 0
         self.unavailable = False
         self.warnings: list[str] = []
+        self.preference_matches: set[tuple[str, str]] = set()
 
     # 후보 전체의 ID 순열만 수용한다. 오류·누락·중복은 기본 추천을 지우지 않고 None으로 반환한다.
     async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
+        self.preference_matches = set()
+        self.unavailable = False
         try:
             snapshots = compact_candidates(shortlist)
             payload = {**context, "candidates": snapshots}
@@ -100,7 +113,13 @@ class MealRanker:
             wanted = set(range(1, len(shortlist) + 1))
             if len(result.candidateIds) != len(shortlist) or set(result.candidateIds) != wanted:
                 raise ValueError("INVALID_RECIPE_RANK_PERMUTATION")
+            matched_ids = result.preferenceMatchedCandidateIds
+            if len(matched_ids) != len(set(matched_ids)) or not set(matched_ids) <= wanted:
+                raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
+            self.preference_matches = {(shortlist[i - 1]["source"], shortlist[i - 1]["sourceRecipeId"]) for i in matched_ids}
             ordered = [shortlist[identifier - 1] for identifier in result.candidateIds]
+            if context.get("preferenceTags"):
+                ordered = sorted(ordered, key=lambda row: (row["source"], row["sourceRecipeId"]) not in self.preference_matches)
             # AI가 실제 임박 활용·소비기한·적합성의 검증된 우선순위를 뒤집을 수 없다.
             constrained = sorted(ordered, key=eligibility_tier)
             if constrained != ordered:
@@ -109,7 +128,7 @@ class MealRanker:
             return constrained
         except AI_ERRORS as exc:
             self.unavailable = isinstance(exc, (AppError, httpx.HTTPError, TimeoutError))
-            allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION"}
+            allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION", "INVALID_RECIPE_PREFERENCE_IDS"}
             code = str(exc) if type(exc) is ValueError and str(exc) in allowed else "TIME_BUDGET_EXCEEDED" if isinstance(exc, TimeoutError) else "REMOTE_OR_SCHEMA_ERROR"
             logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s prompt=%s", type(exc).__name__, code, PROMPT_VERSION)
             self.warnings.append("AI_UNAVAILABLE_OR_INVALID")
@@ -150,8 +169,6 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             # 임박 주재료를 먼저 보되, 같은 핵심 활용 그룹에서는 조리 적합성이 날짜보다 앞선다.
             row["_expiryPriority"] = (0 if urgent_main else 1 if urgent else 2,)
             row["_expiryDetail"] = (min(dates).toordinal(), -len(set(urgent_main))) if dates else (0, 0)
-        if request.strategies == ["USE_EXPIRING"] and not urgent:
-            continue
         strategy = "USE_EXPIRING" if urgent and "USE_EXPIRING" in request.strategies else "MINIMIZE_SHOPPING" if "MINIMIZE_SHOPPING" in request.strategies else "SIMPLE_COOKING"
         essential = [item["ingredientNo"] for item in facts["ingredients"] if item["role"] == "MAIN"]
         row.update(strategy=strategy, essentialIngredientNos=essential,
@@ -178,6 +195,11 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
     rows.sort(key=lambda row: (*eligibility_tier(row), len(row["steps"]) if request.strategies == ["SIMPLE_COOKING"] else 0,
                               len(row["missingIngredients"]), *row.get("_expiryDetail", ()), -row["score"], row["source"], row["sourceRecipeId"]))
     return rows
+
+
+# 원문 후보를 보존하면서 무취향 요청의 동일 우선순위 후보를 요청별로 섞는다.
+def vary_baseline(rows: list[dict], seed: str) -> list[dict]:
+    return sorted(rows, key=lambda row: (*eligibility_tier(row), variation_key(row, seed)))
 
 
 # 순위 판단에 필요한 원문 근거만 압축한다. 실제 응답의 전체 원문 재료와 단계는 자르지 않는다.

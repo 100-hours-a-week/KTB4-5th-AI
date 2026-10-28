@@ -67,7 +67,8 @@ class RecommendationRequest(Contract):
     recommendationMode: Literal["INCLUDE_EXPIRED", "EXCLUDE_EXPIRED"] = "EXCLUDE_EXPIRED"
     inventory: list[InventoryItem] = Field(max_length=300)
     excludedIngredientNames: list[Text] = Field(default_factory=list, max_length=100)
-    limit: int = Field(default=10, ge=1, le=20)
+    limit: int = Field(default=10, ge=1, le=10)
+    preferenceTags: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]] = Field(default_factory=list, max_length=12)
     targetServings: int = Field(default=2, ge=1, le=12, strict=True)
     strategies: list[Strategy] = Field(default_factory=lambda: ["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"], min_length=1, max_length=3)
     # 냉장고 재고와 분리한, 호출자가 명시적으로 보유를 확인한 기본 양념. 분량은 보증하지 않는다.
@@ -78,6 +79,11 @@ class RecommendationRequest(Contract):
     # 중복 재고 ID와 정규화 재고 fingerprint 일치 여부를 확인한다.
     @model_validator(mode="after")
     def validate_inventory(self) -> "RecommendationRequest":
+        self.preferenceTags = list(dict.fromkeys(tag.lstrip("#").strip() for tag in self.preferenceTags))
+        if any(not tag for tag in self.preferenceTags):
+            raise ValueError("빈 취향 태그는 허용하지 않습니다.")
+        if "USE_EXPIRING" not in self.strategies:
+            self.strategies = ["USE_EXPIRING", *self.strategies]
         if len(self.strategies) != len(set(self.strategies)):
             raise ValueError("strategies가 중복됩니다.")
         if len({item.ingredientId for item in self.inventory}) != len(self.inventory):
@@ -166,6 +172,13 @@ class InventoryUsage(Contract):
     availableAmount: float
     usedAmount: float
     remainingAmount: float
+    allocationStatus: Literal["CALCULATED", "UNRESOLVED", "UNUSED"] = "UNUSED"
+    allocations: list["InventoryAllocation"] = Field(default_factory=list)
+
+
+class InventoryAllocation(Contract):
+    ingredientNo: int = Field(gt=0)
+    usedAmount: float = Field(ge=0)
 
 
 class RecommendedRecipe(RecipeSnapshot):
@@ -179,6 +192,7 @@ class RecommendedRecipe(RecipeSnapshot):
     strategy: Strategy | None = None
     targetServings: int = 2
     quantityStatus: Literal["SUFFICIENT", "SHORTAGE", "NEEDS_CHECK"] = "NEEDS_CHECK"
+    quantityScope: Literal["FOOD_INGREDIENTS"] = "FOOD_INGREDIENTS"
     ingredientRequirements: list[IngredientRequirement] = Field(default_factory=list)
     inventoryUsage: list[InventoryUsage] = Field(default_factory=list)
     essentialIngredientNos: list[int] = Field(default_factory=list)
@@ -186,11 +200,12 @@ class RecommendedRecipe(RecipeSnapshot):
     feasibility: Literal["NEEDS_SHOPPING", "NEEDS_CHECK", "QUANTITY_VERIFIED"] = "NEEDS_CHECK"
     confirmationReasons: list[str] = Field(default_factory=list)
     usesExpiringMainIngredients: list[str] = Field(default_factory=list)
+    preferenceMatch: Literal["MATCHED", "NOT_MATCHED", "UNKNOWN", "NOT_REQUESTED"] = "NOT_REQUESTED"
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v10"
+    policyVersion: str = "recipe-rerank-v11"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
@@ -210,7 +225,7 @@ class RecommendationResponse(Contract):
     refrigeratorId: int
     inventoryFingerprint: str
     recommendationMode: str
-    recommendations: list[RecommendedRecipe]
+    recommendations: list[RecommendedRecipe] = Field(max_length=10)
     confirmationCandidates: list[RecommendedRecipe] = Field(default_factory=list, max_length=3)
     uncoveredExpiringIngredients: list[str] = Field(default_factory=list)
     generatedAt: datetime
@@ -218,6 +233,26 @@ class RecommendationResponse(Contract):
     mealPlan: MealPlan = Field(default_factory=MealPlan)
     warnings: list[str] = Field(default_factory=list)
     trace: RecommendationTrace = Field(default_factory=RecommendationTrace)
+    preferenceTags: list[str] = Field(default_factory=list)
+    context: dict[str, str] = Field(default_factory=dict)
+
+
+JobStatus = Literal["QUEUED", "PROCESSING", "COMPLETED", "FAILED"]
+
+
+class RecipeJobAccepted(Contract):
+    jobId: str
+    requestId: str
+    status: JobStatus
+    submittedAt: datetime
+
+
+class RecipeJobView(RecipeJobAccepted):
+    refrigeratorId: int
+    startedAt: datetime | None = None
+    completedAt: datetime | None = None
+    result: RecommendationResponse | None = None
+    error: dict | None = None
 
 
 class ChangesResponse(Contract):

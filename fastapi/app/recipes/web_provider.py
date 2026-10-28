@@ -115,7 +115,7 @@ class WebRecipeProvider:
         self.discovery = discovery or TavilyDiscovery(settings)
 
     # 활용되지 않은 임박 재료를 최대 2개 검색한다. 서명 URL·냉장고 ID·재고량은 전달하지 않는다.
-    async def search(self, focus: list[str], companions: list[str], timeout_seconds: float = 30) -> WebSearchResult:
+    async def search(self, focus: list[str], companions: list[str], timeout_seconds: float = 30, preference_tags: list[str] | None = None) -> WebSearchResult:
         report = WebSearchResult()
         domains = {domain.lower().strip() for domain in self.settings.recipe_tavily_approved_domains}
         if not domains:
@@ -124,7 +124,7 @@ class WebRecipeProvider:
         try:
             async with asyncio.timeout(timeout_seconds):
                 for name in list(dict.fromkeys(focus))[:2]:
-                    query = " ".join([name, *[value for value in companions if value != name][:2], "레시피 재료 분량 조리법"])
+                    query = " ".join([name, *[value for value in companions if value != name][:2], *(preference_tags or [])[:4], "레시피 재료 분량 조리법"])
                     report.searches += 1
                     hits = await self.discovery.search(query[:1000], 5, approved_domains=sorted(domains))
                     for hit in hits:

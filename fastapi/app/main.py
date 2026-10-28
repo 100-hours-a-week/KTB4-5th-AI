@@ -16,6 +16,8 @@ from app.errors import AppError
 from app.feedback import FeedbackService
 from app.logging import ApiAuditLogMiddleware, configure_logging, shutdown_logging
 from app.pipeline import ReceiptAnalysisPipeline
+from app.recipes.job_repository import RecipeJobRepository
+from app.recipes.jobs import RecipeJobs
 from app.recipes.service import RecipeService
 from app.routers import analyses, health, metrics, recipes, status
 from app.runtime import AnalysisRuntime
@@ -50,17 +52,22 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
 
     app_runtime = runtime or build_runtime(app_settings)
     recipe_service = RecipeService(app_settings)
+    recipe_jobs = RecipeJobs(app_settings, recipe_service, RecipeJobRepository(recipe_service.repository) if app_settings.database_url else None)
 
     @asynccontextmanager
     # 앱 시작 시 런타임을 시작하고 종료 시 백그라운드 작업과 자원을 정리한다.
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await app_runtime.start()
+        await recipe_jobs.start()
         try:
             yield
         finally:
-            await app_runtime.stop()
-            await recipe_service.close()
-            shutdown_logging()
+            try:
+                await recipe_jobs.stop()
+            finally:
+                await app_runtime.stop()
+                await recipe_service.close()
+                shutdown_logging()
 
     application = FastAPI(
         title="KTB Image AI",
@@ -73,6 +80,7 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
     application.state.settings = app_settings
     application.state.runtime = app_runtime
     application.state.recipes = recipe_service
+    application.state.recipe_jobs = recipe_jobs
 
     application.add_middleware(ApiAuditLogMiddleware)
 

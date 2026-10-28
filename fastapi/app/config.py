@@ -53,7 +53,14 @@ class Settings(BaseSettings):
     recipe_cache_ttl_seconds: float = Field(default=300, ge=1, le=3600)
     recipe_ai_enabled: bool = True
     recipe_ai_timeout_seconds: float = Field(default=45, ge=1, le=120)
-    recipe_ai_max_candidates: int = Field(default=12, ge=3, le=20)
+    recipe_ai_max_candidates: int = Field(default=20, ge=3, le=20)
+    recipe_queue_maxsize: int = Field(default=100, ge=1, le=100)
+    recipe_consumer_count: int = Field(default=2, ge=1, le=4)
+    recipe_job_timeout_seconds: float = Field(default=120, ge=10, le=300)
+    recipe_result_ttl_seconds: float = Field(default=3600, ge=60, le=86400)
+    recipe_result_max_entries: int = Field(default=2000, ge=105, le=100000)
+    recipe_callback_url: str | None = None
+    recipe_callback_api_key: str | None = Field(default=None, repr=False)
     recipe_food_safety_api_key: str | None = Field(default=None, repr=False)
     recipe_korean_archive_api_key: str | None = Field(default=None, repr=False)
     # 원문 저장·재배포 조건을 확인한 운영자만 활성화한다. 키만 넣어도 자동으로 켜지지 않는다.
@@ -99,6 +106,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     # 운영 인증키·S3 버킷·원격 GPU Worker 조합을 검증하고 유효한 설정 자신을 반환한다.
     def validate_production_settings(self) -> "Settings":
+        if bool(self.recipe_callback_url) != bool(self.recipe_callback_api_key):
+            raise ValueError("RECIPE_CALLBACK_URL과 RECIPE_CALLBACK_API_KEY를 함께 설정하세요")
         if self.callback_url and not self.callback_api_key:
             raise ValueError("CALLBACK_URL을 사용하려면 CALLBACK_API_KEY가 필요합니다")
         if self.callback_api_key and not self.callback_url:
