@@ -4,7 +4,7 @@
 문자 인식, 상품 영역 검출과 멀티모달 모델 추론을 수행하고 구조화된 원시 결과를 FastAPI 서버에
 반환한다.
 
-레시피에서는 기존 Gemma로 검증된 후보의 순서만 조정한다. `POST /internal/v1/recipes/reason`의 현행 경로는 RANK이며 기존 `X-Worker-API-Key`로 인증한다. DB 검색·분량 계산·재고 차감 권한은 Worker에 없고, FastAPI가 준 후보 ID 전체를 정확히 한 번씩 반환한다. `gpu_worker/recipe_reasoner.py`가 JSON Schema·순열을 검증하고 `recipe_contract.py`가 공통 계약을 정의한다. PLAN/SELECT는 배포 전환 호환을 위해 수용하지만 현 추천 서비스는 호출하지 않는다. 사진과 같은 inference/LLM 세마포어를 공유하므로 자원 경합이 발생할 수 있다.
+레시피에서는 기존 Gemma로 후보 순위 RANK와 웹 본문 구조화 EXTRACT를 수행한다. `POST /internal/v1/recipes/reason`에서 기존 `X-Worker-API-Key`로 인증한다. RANK는 FastAPI가 준 후보 ID 전체를 정확히 한 번씩 반환한다. EXTRACT는 FastAPI가 Tavily에서 확보한 본문을 받아 재료명/분량 구절과 조리문을 원문 인용으로 반환한다. DB 검색/분량 계산/재고 차감 권한은 없다. `gpu_worker/recipe_reasoner.py`가 JSON Schema와 근거를 검증하고 `recipe_contract.py`가 공통 계약을 정의한다. PLAN/SELECT는 호환 경로이며 현 추천 서비스는 호출하지 않는다. 사진과 같은 inference/LLM 세마포어를 공유하므로 자원 경합이 발생할 수 있다.
 
 RANK는 후보 개수와 같은 길이의 candidateIds 순열, preferenceMatchedCandidateIds와 적합 ID별 원문 인용 preferenceEvidence를 출력한다. 취향 태그가 있으면 제공된 원문에서 적합 근거가 있는 후보 ID만 표시한다. 취향이 없으면 서버가 전달한 계절/식사 시간대와 variationSeed를 참고한다. 후보 삭제, 요리 생성, 분량 추론은 하지 않으며 실패 시 FastAPI가 기본 추천과 취향 미확인 상태를 유지한다. FastAPI가 실행 예산을 전달하면 슬롯 대기부터 해당 예산으로 제한하며, 대기/토큰/생성/로딩 시간을 로그로 구분한다.
 

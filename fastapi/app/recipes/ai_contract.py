@@ -39,14 +39,26 @@ class RankResult(WireModel):
     preferenceEvidence: list[PreferenceEvidence] = Field(default_factory=list, max_length=20)
 
 
+class ExtractedIngredient(WireModel):
+    name: str = Field(min_length=1, max_length=200)
+    quote: str = Field(min_length=1, max_length=1000)
+
+
+class ExtractedRecipe(WireModel):
+    title: str = Field(min_length=1, max_length=500)
+    ingredients: list[ExtractedIngredient] = Field(max_length=80)
+    steps: list[str] = Field(max_length=60)
+    status: Literal["EXTRACTED", "INSUFFICIENT", "MIXED_BATCH"]
+
+
 class RecipeAiRequest(WireModel):
-    stage: Literal["PLAN", "SELECT", "RANK"]
+    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT"]
     # 값 내부도 FastAPI에서 만든 재고·원천 스냅샷이다. Worker는 도구 실행·DB 접근을 하지 않는다.
     context: dict
 
 
 class RecipeAiResponse(WireModel):
-    stage: Literal["PLAN", "SELECT", "RANK"]
-    result: PlanResult | SelectionResult | RankResult
+    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT"]
+    result: PlanResult | SelectionResult | RankResult | ExtractedRecipe
     model: str
     promptVersion: str = PROMPT_VERSION

@@ -2,7 +2,7 @@
 
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.config import Settings
-from app.recipes.ai_contract import PROMPT_VERSION, RankResult, RecipeAiResponse
+from app.recipes.ai_contract import PROMPT_VERSION, ExtractedRecipe, RankResult, RecipeAiResponse
 
 
 class RecipeReasoner:
@@ -17,6 +17,13 @@ class RecipeReasoner:
         if not isinstance(result.result, RankResult):
             raise ValueError("RECIPE_RANK_SCHEMA_MISMATCH")
         return result.result, result.model
+
+    # 웹 본문을 원문 인용으로만 구조화한다. 외부 검색이나 DB 쓰기는 Worker에 위임하지 않는다.
+    async def extract(self, context: dict) -> ExtractedRecipe:
+        result = await self._call("EXTRACT", context)
+        if not isinstance(result.result, ExtractedRecipe):
+            raise ValueError("RECIPE_EXTRACT_SCHEMA_MISMATCH")
+        return result.result
 
     # 모델 프롬프트 계약이 다른 구버전 Worker 응답은 정상 AI 결과로 수용하지 않는다.
     async def _call(self, stage: str, context: dict) -> RecipeAiResponse:

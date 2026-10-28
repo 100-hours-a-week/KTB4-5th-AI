@@ -67,6 +67,8 @@ preferenceMatch는 AI 판단 MATCHED, 평가했지만 적합 근거가 없는 NO
 
 MATCHED에는 preferenceEvidence로 원문 인용을 함께 제공한다. 인용이 원문에 없거나 알려진 취향 조건과 모순되면 UNKNOWN으로 처리한다. AI_INPUT_WINDOW_REDUCED는 입력 크기로 AI 평가 범위만 줄였다는 뜻이며 최종 원문/후보를 삭제했다는 뜻은 아니다. trace.aiInputBytes/aiCandidateCount/timingsMs로 마지막 AI 입력과 추천 생성 단계 시간을 확인한다. 큐 대기/콜백 시간은 job의 시각과 로그로 별도 확인한다.
 
+웹 보충의 trace.webDiscoveredCount는 받은 검색 결과 수, webExtractionCalls는 규칙 실패 후 Gemma EXTRACT 시도 수, webParseFailureCounts는 최종 추출 실패 사유별 건수다. timingsMs.webExtractionMs는 해당 모델 호출 대기 포함 시간이다. aiCalls는 RANK와 EXTRACT 시도의 합계이며 recommendationEngine=AI는 최종 RANK 성공을 뜻한다. 추출만 AI를 사용하고 최종 정렬이 폴백인 경우 RULE_FALLBACK일 수 있다. 기존 요청 필드와 레시피 콜백 경로는 유지한다.
+
 레시피 하나에 당근 3개가 필요한 경우의 inventoryUsage 부분 예시:
 
 ```json

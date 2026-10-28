@@ -214,6 +214,9 @@ class RecommendationTrace(Contract):
     candidateCount: int = 0
     externalSearchCount: int = 0
     webSearchCount: int = 0
+    webDiscoveredCount: int = 0
+    webExtractionCalls: int = 0
+    webParseFailureCounts: dict[str, int] = Field(default_factory=dict)
     aiCandidateCount: int = 0
     aiInputBytes: int = 0
     timingsMs: dict[str, float] = Field(default_factory=dict)

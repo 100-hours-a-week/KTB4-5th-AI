@@ -37,7 +37,7 @@ class RecipeService:
         self._ai_retry_after = 0.0
         self.repository = repository or RecipeRepository(settings)
         self.provider = provider or FoodSafetyProvider(settings)
-        self.web_provider = WebRecipeProvider(settings)
+        self.web_provider = WebRecipeProvider(settings, reasoner=self.reasoner)
         self.cache = BoundedAsyncCache[RecommendationResponse](settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
 
     # 재료 이름·제외 목록·날짜별 캐시를 검증하고 확정 재고 기반 추천을 반환한다.
@@ -58,6 +58,7 @@ class RecipeService:
         # 캐시 미스 시 DB를 우선 조회하고 부족하면 승인된 원천을 최대 한 번 보충한다.
         async def load() -> RecommendationResponse:
             started = monotonic()
+            web_reports = []
             external_deadline = started + min(20, self.settings.recipe_ai_timeout_seconds / 2)
             original_stock = {item.ingredientId: item.name for item in request.inventory}
             inventory = [item.model_copy(update={"name": canonical(item.ingredientKey) if item.ingredientKey else stock_ingredient(item.name)}) for item in request.inventory
@@ -165,6 +166,7 @@ class RecipeService:
                     report = await self.web_provider.search(focus or search_names[:1], search_names, timeout_seconds=max(0.1, external_deadline - monotonic()),
                                                             preference_tags=request.preferenceTags)
                     web_searches = report.searches
+                    web_reports.append(report)
                     if report.unavailable:
                         ranker.warnings.append("WEB_SEARCH_UNAVAILABLE")
                     merged = {(row["source"], row["sourceRecipeId"]): row for row in ranked}
@@ -209,6 +211,7 @@ class RecipeService:
                                                             timeout_seconds=max(0.1, external_deadline - monotonic()),
                                                             preference_tags=request.preferenceTags)
                     web_searches += report.searches
+                    web_reports.append(report)
                     merged = {(row["source"], row["sourceRecipeId"]): row for row in ranked}
                     added = False
                     for recipe, raw in report.recipes:
@@ -287,7 +290,13 @@ class RecipeService:
                         json.dumps({"requestId": request.requestId, **candidate_diagnostics(ranked, len(baseline), len(confirmation_rows))},
                                    ensure_ascii=False, separators=(",", ":")))
             timings = {"databaseSearchMs": round(database_ms, 3), "initialCandidateEvaluationMs": round(validation_ms, 3),
+                       "webExtractionMs": round(sum(report.extraction_ms for report in web_reports), 3),
                        "aiRankMs": round(ranker.duration_ms, 3), "recommendationMs": round((monotonic() - started) * 1000, 3)}
+            web_failures = {}
+            for report in web_reports:
+                for code, count in report.failure_reasons.items():
+                    web_failures[code] = web_failures.get(code, 0) + count
+            extraction_calls = sum(report.extraction_calls for report in web_reports)
             logger.info("recipe_recommendation_timing request_id=%s timings_ms=%s ai_input_bytes=%d ai_candidate_count=%d", request.requestId,
                         json.dumps(timings, separators=(",", ":")), ranker.input_bytes, ranker.candidate_count)
             return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", refrigeratorId=request.refrigeratorId,
@@ -298,9 +307,11 @@ class RecipeService:
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           mealPlan={}, warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           context=context["recommendationContext"],
-                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls else None,
-                                                 "aiCalls": ranker.calls, "searchCount": searches, "candidateCount": len(ranked),
+                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls or extraction_calls else None,
+                                                 "aiCalls": ranker.calls + extraction_calls, "searchCount": searches, "candidateCount": len(ranked),
                                                   "externalSearchCount": int(external_searched), "webSearchCount": web_searches,
+                                                  "webDiscoveredCount": sum(report.discovered for report in web_reports),
+                                                  "webExtractionCalls": extraction_calls, "webParseFailureCounts": web_failures,
                                                   "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings})
 
         result = await self.cache.get_or_load(key, load)
