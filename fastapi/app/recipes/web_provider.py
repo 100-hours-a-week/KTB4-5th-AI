@@ -187,8 +187,8 @@ class WebRecipeProvider:
                                     report.extraction_calls += 1
                                     extraction_started = monotonic()
                                     try:
-                                        async with asyncio.timeout(10):
-                                            extracted = await self.reasoner.extract({"sourceTitle": hit.title, "sourceText": text, "executionBudgetSeconds": 9})
+                                        async with asyncio.timeout(16):
+                                            extracted = await self.reasoner.extract({"sourceTitle": hit.title, "sourceText": text, "executionBudgetSeconds": 15})
                                         verified = validate_extraction(extracted, text, hit.title)
                                         if verified:
                                             recipe = Recipe(source="TAVILY_WEB", sourceRecipeId=hashlib.sha256(hit.url.encode()).hexdigest(),

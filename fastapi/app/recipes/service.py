@@ -204,6 +204,8 @@ class RecipeService:
             ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
             can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags)) and monotonic() >= self._ai_retry_after
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
+            # 웹 보충 예산에 DB 후보의 LLM 정렬 시간을 중복 차감하지 않는다. 전체 AI 예산은 별도로 유지한다.
+            external_deadline += ranker.duration_ms / 1000
             # 취향을 만족한 DB 후보가 없으면 승인 웹 원천을 한 번 보충하고 같은 검증/AI 판단을 적용한다.
             if request.preferenceTags and not ranker.preference_matches:
                 if self.settings.recipe_tavily_api_key and not web_searches:

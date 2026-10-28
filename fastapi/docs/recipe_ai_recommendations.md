@@ -61,9 +61,9 @@ TAVILY_API_KEY가 있으면 전체 웹 검색을 수행한다. RECIPE_TAVILY_APP
 
 단일 schema.org Recipe 또는 명시적인 Markdown 재료/조리 구획만 파싱하고 원문, 재료, 단계와 인분을 검증한다. 서버가 검색 URL에 직접 접속하지 않고 Tavily 응답을 검증한다. 불완전 자료를 LLM으로 채워 정상 레시피로 저장하지 않는다. sourceUrl과 원문 revision을 보존한다. 웹 보충 실패 시 기존 추천을 유지한다.
 
-Markdown 제목 외에 [재료], 굵은 재료소개/만드는 법도 인식한다. 블로그 메뉴 제목 대신 검색 결과 제목을 활용한다. 규칙으로 읽지 못한 본문은 기존 원격 Gemma의 EXTRACT 단계에 최대 2건 전달한다. 각 시도는 슬롯 대기 포함 Worker 9초/호출자 10초 상한이며 외부 보충 전체 예산 안에서만 실행한다. 본문은 정리 후 최대 24,000바이트로 제한하며 넘으면 조용히 자르지 않고 거부한다. 별도 GPU 모델은 추가하지 않는다.
+Markdown 제목 외에 [재료], 굵은 재료소개/만드는 법도 인식한다. 블로그 메뉴 제목 대신 검색 결과 제목을 활용한다. 규칙으로 읽지 못한 본문은 기존 원격 Gemma의 EXTRACT 단계에 최대 2건 전달한다. 각 시도는 슬롯 대기 포함 Worker 15초/호출자 16초 상한이며 외부 보충 전체 예산 안에서만 실행한다. DB 후보 RANK에 걸린 시간은 외부 보충 예산에서 중복 차감하지 않으며 전체 AI 잔여 예산은 별도로 제한한다. 본문은 정리 후 최대 24,000바이트로 제한하며 넘으면 조용히 자르지 않고 거부한다. 별도 GPU 모델은 추가하지 않는다.
 
-EXTRACT는 재료별 name/quote와 원문 조리 구절만 반환한다. FastAPI는 실제 본문 포함 여부, 순서, 중복 재료 인용과 명시된 번호 단계 누락을 검증한다. g/ml/개는 기존 단위 파서로 계산하고 스푼 등 미지원 단위는 원문을 보존한 UNKNOWN이다. 인분은 원문에 하나의 값으로 명시된 경우만 사용한다. 대량 양념의 소분/여러 번 사용, 배수 조리가 섞인 경우 MIXED_BATCH로 제외한다. 모델 출력의 원문 일치가 전체 레시피의 완전성이나 요리 안전성을 보증하지는 않는다.
+EXTRACT는 재료별 name/quote와 원문 조리 구절만 반환한다. FastAPI는 실제 본문 포함 여부, 순서, 중복 재료 인용과 명시된 번호 단계 누락을 검증한다. 원문 파서가 읽은 전체 재료명과 수량을 우선하므로 모델이 다시마로 줄였더라도 원문의 다시마 작은 조각을 보존한다. g/ml/개는 기존 단위 파서로 계산하고 스푼 등 미지원 단위는 원문을 보존한 UNKNOWN이다. 인분은 원문에 하나의 값으로 명시된 경우만 사용한다. 대량 양념의 소분/여러 번 사용, 배수 조리가 섞인 경우 MIXED_BATCH로 제외한다. 모델 출력의 원문 일치가 전체 레시피의 완전성이나 요리 안전성을 보증하지는 않는다.
 
 trace에 webDiscoveredCount, webExtractionCalls, webParseFailureCounts를 추가한다. aiCalls는 RANK와 EXTRACT의 합계이며 timingsMs.webExtractionMs는 모델 호출 대기를 포함한다. EMPTY_BODY, MIXED_BATCH, INGREDIENT_SECTION_NOT_FOUND, STEP_SECTION_NOT_FOUND, INGREDIENT_OR_STEP_VALIDATION_FAILED, EXTRACTION_INPUT_TOO_LARGE, MODEL_SOURCE_EVIDENCE_REJECTED, MODEL_EXTRACTION_UNAVAILABLE 등을 구분해 기록한다. 검색 결과 원문과 키는 로그에 복제하지 않는다. EXTRACT 실패는 기존 추천을 유지하며 FastAPI와 Worker를 함께 배포해야 한다.
 

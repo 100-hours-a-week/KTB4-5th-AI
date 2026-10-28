@@ -43,8 +43,9 @@ def quoted_ingredient(name: str, quote: str, number: int) -> Ingredient | None:
     parsed = parse_piece(quote)
     if parsed and len(parsed) == 1:
         item = parsed[0]
-        if re.sub(r"\s+", "", item.name) != re.sub(r"\s+", "", name):
+        if name not in quote:
             return None
+        # 모델의 짧은 이름으로 교체하지 않고 원문 파서의 전체 이름/수량을 유지한다.
         return item.model_copy(update={"ingredientNo": number})
     if not NAME.fullmatch(name) or name not in quote or re.search(r"\d", name):
         return None
