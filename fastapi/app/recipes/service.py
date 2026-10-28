@@ -161,7 +161,7 @@ class RecipeService:
             focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
             # 구조화 원천 보충 뒤에도 핵심 임박 재료가 빠지면 최후로 승인된 웹 원천을 검색한다.
             if names and (focus or not baseline):
-                if self.settings.recipe_tavily_api_key and self.settings.recipe_tavily_approved_domains:
+                if self.settings.recipe_tavily_api_key:
                     report = await self.web_provider.search(focus or search_names[:1], search_names, timeout_seconds=max(0.1, external_deadline - monotonic()),
                                                             preference_tags=request.preferenceTags)
                     web_searches = report.searches
@@ -171,8 +171,11 @@ class RecipeService:
                     for recipe, raw in report.recipes:
                         # 어댑터 이후에도 ACTIVE·제외 조건을 다시 검사한다.
                         if (recipe.source == "TAVILY_WEB" and recipe.sourceUrl and raw.get("url") == recipe.sourceUrl
-                                and urlsplit(recipe.sourceUrl).hostname in self.settings.recipe_tavily_approved_domains and usable(recipe)):
-                            await self.repository.save(recipe, raw, "operator-approved:TAVILY_WEB")
+                                and usable(recipe)):
+                            if urlsplit(recipe.sourceUrl).hostname in self.settings.recipe_tavily_approved_domains:
+                                await self.repository.save(recipe, raw, "operator-approved:TAVILY_WEB")
+                            else:
+                                ranker.warnings.append("WEB_SOURCE_NOT_REGISTERED")
                             merged[(recipe.source, recipe.sourceRecipeId)] = score_candidate(recipe)
                     ranked = list(merged.values())
                     baseline = build_baseline(ranked, matched_request)
@@ -180,7 +183,7 @@ class RecipeService:
                     if web_searches and not report.recipes:
                         ranker.warnings.append("WEB_SEARCH_NO_VERIFIED_RECIPE")
                 else:
-                    ranker.warnings.append("WEB_SEARCH_NOT_CONFIGURED_OR_APPROVED")
+                    ranker.warnings.append("WEB_SEARCH_NOT_CONFIGURED")
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
             confirmations = confirmation_rows[:3]
             if confirmations:
@@ -201,7 +204,7 @@ class RecipeService:
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
             # 취향을 만족한 DB 후보가 없으면 승인 웹 원천을 한 번 보충하고 같은 검증/AI 판단을 적용한다.
             if request.preferenceTags and not ranker.preference_matches:
-                if self.settings.recipe_tavily_api_key and self.settings.recipe_tavily_approved_domains and not web_searches:
+                if self.settings.recipe_tavily_api_key and not web_searches:
                     report = await self.web_provider.search(search_names[:2], search_names,
                                                             timeout_seconds=max(0.1, external_deadline - monotonic()),
                                                             preference_tags=request.preferenceTags)
@@ -210,8 +213,11 @@ class RecipeService:
                     added = False
                     for recipe, raw in report.recipes:
                         if (recipe.source == "TAVILY_WEB" and recipe.sourceUrl and raw.get("url") == recipe.sourceUrl
-                                and urlsplit(recipe.sourceUrl).hostname in self.settings.recipe_tavily_approved_domains and usable(recipe)):
-                            await self.repository.save(recipe, raw, "operator-approved:TAVILY_WEB")
+                                and usable(recipe)):
+                            if urlsplit(recipe.sourceUrl).hostname in self.settings.recipe_tavily_approved_domains:
+                                await self.repository.save(recipe, raw, "operator-approved:TAVILY_WEB")
+                            else:
+                                ranker.warnings.append("WEB_SOURCE_NOT_REGISTERED")
                             merged[(recipe.source, recipe.sourceRecipeId)] = score_candidate(recipe)
                             added = True
                     if added:
@@ -227,7 +233,7 @@ class RecipeService:
                     if report.unavailable:
                         ranker.warnings.append("WEB_SEARCH_UNAVAILABLE")
                 else:
-                    ranker.warnings.append("PREFERENCE_WEB_SEARCH_NOT_CONFIGURED_OR_APPROVED")
+                    ranker.warnings.append("PREFERENCE_WEB_SEARCH_NOT_CONFIGURED")
             evaluated = ranker.evaluated_identities
             for row in baseline:
                 identity = (row["source"], row["sourceRecipeId"])

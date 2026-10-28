@@ -52,14 +52,14 @@ class TavilyDiscovery:
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
 
-    # 레시피/공급자 검색 결과의 URL·제목만 반환한다. 원문·이미지를 수집하거나 Recipe로 승격하지 않는다.
-    async def search(self, query: str, max_results: int = 5, approved_domains: list[str] | None = None) -> list[DiscoveryHit]:
+    # 기본은 URL/제목 탐색이며, 명시적으로 요청한 경우에만 추출 본문을 함께 읽는다. 원천 DB에는 저장하지 않는다.
+    async def search(self, query: str, max_results: int = 5, approved_domains: list[str] | None = None, fetch_raw_content: bool = False) -> list[DiscoveryHit]:
         if not self.settings.recipe_tavily_api_key:
             raise DependencyUnavailable("TAVILY_API_KEY가 설정되지 않았습니다.")
         if not query.strip() or len(query) > 1000 or not 1 <= max_results <= 10:
             raise ValueError("검색어 길이는 1~1000, 결과 수는 1~10이어야 합니다.")
         payload = {"query": query, "search_depth": "basic", "max_results": max_results, "include_answer": False,
-                   "include_raw_content": False, "include_images": False, "auto_parameters": False, "include_usage": True}
+                   "include_raw_content": bool(fetch_raw_content or approved_domains), "include_images": False, "auto_parameters": False, "include_usage": True}
         if approved_domains:
             payload.update(include_domains=approved_domains, include_raw_content=True)
         try:
@@ -93,7 +93,7 @@ class TavilyDiscovery:
                     continue
                 try:
                     hit = DiscoveryHit(title=row.get("title"), url=row.get("url"), searchScore=row.get("score"),
-                                       rawContent=row.get("raw_content") if approved_domains else None)
+                                       rawContent=row.get("raw_content") if fetch_raw_content or approved_domains else None)
                 except ValueError:
                     continue
                 if hit.url not in seen:

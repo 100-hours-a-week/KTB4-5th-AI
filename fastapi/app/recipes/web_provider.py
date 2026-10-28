@@ -1,4 +1,4 @@
-"""Tavily로 승인된 원천을 찾고 명시적인 재료·조리 구획만 파싱한다. 조리법은 생성하지 않는다."""
+"""Tavily 전체 웹 검색에서 명시적인 재료/조리 구획을 검증한다. 원천 DB 저장 승인은 별도로 판단한다."""
 
 import asyncio
 import hashlib
@@ -6,7 +6,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
 
 from app.config import Settings
 from app.errors import AppError
@@ -22,6 +21,7 @@ class WebSearchResult:
     recipes: list[tuple[Recipe, dict]] = field(default_factory=list)
     searches: int = 0
     unavailable: bool = False
+    discovered: int = 0
 
 
 # schema.org의 Recipe와 HowToSection을 제한된 깊이로 읽고 순서를 유지한다.
@@ -109,7 +109,7 @@ def parse_web_recipe(hit: DiscoveryHit) -> Recipe | None:
 
 
 class WebRecipeProvider:
-    # approved_domains는 본문 저장·가공·서비스 제공을 확인한 정확한 호스트 목록이다. 기본값은 비어 있다.
+    # 전체 웹 검색과 원문 구획 검증을 담당한다. 원천 DB 등록 승인은 서비스 계층에서 별도로 확인한다.
     def __init__(self, settings: Settings, discovery: TavilyDiscovery | None = None) -> None:
         self.settings = settings
         self.discovery = discovery or TavilyDiscovery(settings)
@@ -117,24 +117,20 @@ class WebRecipeProvider:
     # 활용되지 않은 임박 재료를 최대 2개 검색한다. 서명 URL·냉장고 ID·재고량은 전달하지 않는다.
     async def search(self, focus: list[str], companions: list[str], timeout_seconds: float = 30, preference_tags: list[str] | None = None) -> WebSearchResult:
         report = WebSearchResult()
-        domains = {domain.lower().strip() for domain in self.settings.recipe_tavily_approved_domains}
-        if not domains:
-            return report
         results = {}
         try:
             async with asyncio.timeout(timeout_seconds):
                 for name in list(dict.fromkeys(focus))[:2]:
                     query = " ".join([name, *[value for value in companions if value != name][:2], *(preference_tags or [])[:4], "레시피 재료 분량 조리법"])
                     report.searches += 1
-                    hits = await self.discovery.search(query[:1000], 5, approved_domains=sorted(domains))
+                    hits = await self.discovery.search(query[:1000], 5, fetch_raw_content=True)
+                    report.discovered += len(hits)
                     for hit in hits:
-                        if urlsplit(hit.url).hostname not in domains:
-                            continue
                         recipe = parse_web_recipe(hit)
                         if recipe:
                             results[(recipe.source, recipe.sourceRecipeId)] = (recipe, {"url": hit.url, "raw_content": hit.rawContent})
         except (AppError, TimeoutError):
             report.unavailable = True
         report.recipes = list(results.values())
-        logger.info("recipe_web_source_completed searches=%d validated_count=%d unavailable=%s", report.searches, len(results), report.unavailable)
+        logger.info("recipe_web_source_completed searches=%d discovered_count=%d validated_count=%d unavailable=%s", report.searches, report.discovered, len(results), report.unavailable)
         return report

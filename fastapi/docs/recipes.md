@@ -36,6 +36,6 @@ AI PostgreSQL recipe_ai.recipes는 출처/원문 스냅샷, recipe_ai.changes는
 2. FastAPI와 RunPod의 v5 레시피 계약을 함께 배포한다.
 3. RECIPE_CALLBACK_URL과 RECIPE_CALLBACK_API_KEY를 백엔드 레시피 수신 경로에 맞춰 설정한다. 영수증 CALLBACK_URL을 재사용하지 않는다.
 4. 기본 큐 크기는 100, 소비자 2, 작업 처리 상한 120초, 메모리 결과 TTL 3600초다.
-5. 웹 보충은 TAVILY_API_KEY와 승인된 원천 도메인이 있어야 실행한다. 미설정이면 경고와 기존 결과를 유지한다.
+5. 웹 보충은 TAVILY_API_KEY가 있으면 도메인 제한 없이 검색한다. RECIPE_TAVILY_APPROVED_DOMAINS는 원천 DB 재사용 등록에만 적용한다. 미승인 원천도 실제 재료/조리 구획 검증을 통과하면 이번 추천에 포함할 수 있지만 원천 DB에는 등록하지 않는다. 작업 결과 스냅샷에는 해당 추천이 남는다.
 
 상세한 장애/재시작 보장은 추천 정책의 운영 절을 따른다. 원문 확인 없이 수량 환산, 조리법 생성, 미검증 원천 자동 저장, 모델 가중치 학습은 수행하지 않는다.
