@@ -201,11 +201,12 @@ class RecommendedRecipe(RecipeSnapshot):
     confirmationReasons: list[str] = Field(default_factory=list)
     usesExpiringMainIngredients: list[str] = Field(default_factory=list)
     preferenceMatch: Literal["MATCHED", "NOT_MATCHED", "UNKNOWN", "NOT_REQUESTED"] = "NOT_REQUESTED"
+    preferenceEvidence: str | None = None
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v11"
+    policyVersion: str = "recipe-rerank-v12"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
@@ -213,6 +214,9 @@ class RecommendationTrace(Contract):
     candidateCount: int = 0
     externalSearchCount: int = 0
     webSearchCount: int = 0
+    aiCandidateCount: int = 0
+    aiInputBytes: int = 0
+    timingsMs: dict[str, float] = Field(default_factory=dict)
 
 
 class MealPlan(Contract):

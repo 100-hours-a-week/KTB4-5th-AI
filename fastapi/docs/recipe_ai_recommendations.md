@@ -1,4 +1,16 @@
-# 냉장고 레시피 추천 설계 v11
+# 냉장고 레시피 추천 설계 v12
+
+## AI 입력/취향 근거와 처리시간
+
+AI에는 각 재료의 이름/역할/분량 판정 상태/계열 확인 힌트와 원문 조리 2단계의 각 80자를 보낸다. 이미 FastAPI가 계산한 수량을 다시 추론시키지 않으므로 원문 수치/역할 설명의 반복 전송과 전체 재고의 카테고리/중량 필드를 줄인다. ingredientColumns가 압축 배열의 열을 설명하고 생략 표시를 함께 보낸다. 공개 ingredients/steps/amountText/inventoryUsage는 줄이지 않는다.
+
+입력 크기는 실제 HTTP JSON처럼 공백 없는 UTF-8 직렬화로 검사한다. RECIPE_AI_INPUT_MAX_BYTES 기본 16000바이트/최대 24000바이트다. 초과하면 AI 평가 창만 줄이고 AI_INPUT_WINDOW_REDUCED를 표시한다. AI가 보지 않은 후보는 UNKNOWN이며 원래 후보 목록과 최대 10개 추천 정책은 유지한다. 단일 후보도 담을 수 없는 비정상적 입력은 기본 추천으로 돌아간다.
+
+Worker 계약 recipe-grounded-v5는 취향 적합 ID마다 원문 인용 preferenceEvidence를 요구한다. 같은 순열을 모든 취향의 적합 ID로 복사하지 않도록 지시한다. FastAPI는 인용문이 실제 전송한 제목/재료/조리 구절인지 검증한다. 알려진 매운맛 태그는 명시적인 매운 근거를 요구하고, 담백한/안 매운 태그와 명시적 매운 근거가 충돌하면 확인 상태로 둔다. 거부한 적합 주장은 UNKNOWN과 AI_PREFERENCE_EVIDENCE_REJECTED로 표시한다. 이 검사는 주관적인 맛의 정확도나 알레르기 안전을 보증하지 않는다.
+
+trace의 aiInputBytes/aiCandidateCount는 마지막 시도한 AI 입력의 크기/후보 수다. timingsMs는 databaseSearchMs(DB 조회), initialCandidateEvaluationMs(초기 필터/분량/기본 정렬), aiRankMs(슬롯/원격 탐색/모델 호출/응답 검증 대기), recommendationMs(추천 생성 전체)를 기록한다. 서로 독립적인 합산 항목이 아니며 전체 시간에는 앞 항목들이 포함된다. 큐 대기/콜백 전달/최종 작업 DB 저장은 이 추천 생성 시간 밖이다. 순수 GPU 시간과도 구분한다. 캐시 결과는 원본 생성 당시 측정값이다.
+
+원문 인분/분량 미상은 값을 지어내지 않고 SOURCE_SERVINGS_UNAVAILABLE / SOURCE_QUANTITIES_UNRESOLVED로 알린다. 정확한 인분/분량 원천이 확보돼야 사용량 계산 범위를 늘릴 수 있다. 이 변경에는 새 SQL이 없다.
 
 ## 정책
 
@@ -70,9 +82,9 @@ POST/GET/콜백 계약은 [레시피 비동기 API](recipe_async_api.md)를 따�
 
 ## 운영
 
-- FastAPI 정책 recipe-rerank-v11과 Worker recipe-grounded-v4를 함께 배포한다. 구 Worker는 프로토콜 불일치로 AI 결과를 수용하지 않고 기본 추천으로 돌아간다.
+- FastAPI 정책 recipe-rerank-v12와 Worker recipe-grounded-v5를 함께 배포한다. 구 Worker는 프로토콜 불일치로 AI 결과를 수용하지 않고 기본 추천으로 돌아간다.
 - 큐는 프로세스 메모리이며 소비자 기본 2개, 최대 4개다. GPU Worker는 사진과 동일 모델/LLM 세마포어를 사용하므로 완전한 자원 격리는 아니다.
-- 작업 처리 상한은 기본 120초이며 큐 대기는 별도다. 각 RANK 슬롯 대기/호출은 최대 10초다. 취향 웹 보충 후 재평가하면 RANK는 최대 2회다.
+- 작업 처리 상한은 기본 120초이며 큐 대기는 별도다. 각 RANK 슬롯 대기/호출은 RECIPE_AI_RANK_TIMEOUT_SECONDS 기본 20초와 전체 AI 예산 잔여시간 중 작은 값으로 제한한다. 취향 웹 보충 후 재평가하면 RANK는 최대 2회다.
 - 원격 장애는 프로세스 내 30초 호출 쉬기를 적용한다. 오류가 아닌 의도적 AI 비활성은 기본 추천으로 동작한다. AI 실패/불확실한 취향은 경고와 preferenceMatch로 구분한다.
 - 메모리 결과 기본 1시간/최대 2000건이며 terminal 결과는 022 테이블에 보관한다. DB 보존 기간/삭제는 별도 운영 정책이다.
 - 인메모리 큐/멱등 접수는 단일 FastAPI 프로세스와 단일 replica 기준이다. 여러 ECS replica로 늘리면 공용 큐/멱등 예약 구조가 필요하다.

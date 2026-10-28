@@ -1,6 +1,6 @@
 # 레시피 추천/동기화 구조
 
-현행 정책은 recipe-rerank-v11, Worker 계약은 recipe-grounded-v4다. 확정 재고와 취향을 비동기로 받아 임박 재료 활용을 우선하는 최대 10개 레시피와 재고 ID별 사용량을 반환한다.
+현행 정책은 recipe-rerank-v12, Worker 계약은 recipe-grounded-v5다. 확정 재고와 취향을 비동기로 받아 임박 재료 활용을 우선하는 최대 10개 레시피와 재고 ID별 사용량을 반환한다. AI 입력 예산에 맞춰 평가 창을 조정하며 원문은 보존한다. 취향 적합 주장은 실제 원문 인용으로 검증한다.
 
 ## 구성
 
@@ -33,7 +33,7 @@ AI PostgreSQL recipe_ai.recipes는 출처/원문 스냅샷, recipe_ai.changes는
 
 1. 기존 020/021 이후 022_recipe_recommendation_results.sql을 AI PostgreSQL에 적용한다. 앱 시작 시 DDL은 실행하지 않는다.
    관리자 계정으로 생성했다면 앱 DB 계정에 새 테이블의 SELECT/INSERT/UPDATE와 recommendation_results_id_seq의 USAGE 권한을 별도로 부여한다. 기존 레시피 스키마의 접근 권한도 유지한다.
-2. FastAPI와 RunPod의 v4 레시피 계약을 함께 배포한다.
+2. FastAPI와 RunPod의 v5 레시피 계약을 함께 배포한다.
 3. RECIPE_CALLBACK_URL과 RECIPE_CALLBACK_API_KEY를 백엔드 레시피 수신 경로에 맞춰 설정한다. 영수증 CALLBACK_URL을 재사용하지 않는다.
 4. 기본 큐 크기는 100, 소비자 2, 작업 처리 상한 120초, 메모리 결과 TTL 3600초다.
 5. 웹 보충은 TAVILY_API_KEY와 승인된 원천 도메인이 있어야 실행한다. 미설정이면 경고와 기존 결과를 유지한다.

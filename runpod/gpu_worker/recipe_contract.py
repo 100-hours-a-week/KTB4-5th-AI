@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROMPT_VERSION = "recipe-grounded-v4"
+PROMPT_VERSION = "recipe-grounded-v5"
 Strategy = Literal["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"]
 
 
@@ -28,9 +28,15 @@ class SelectionResult(WireModel):
     selections: list[Selection] = Field(max_length=20)
 
 
+class PreferenceEvidence(WireModel):
+    candidateId: int = Field(ge=1)
+    quote: str = Field(min_length=1, max_length=80)
+
+
 class RankResult(WireModel):
     candidateIds: list[int] = Field(min_length=1, max_length=20)
     preferenceMatchedCandidateIds: list[int] = Field(default_factory=list, max_length=20)
+    preferenceEvidence: list[PreferenceEvidence] = Field(default_factory=list, max_length=20)
 
 
 class RecipeAiRequest(WireModel):

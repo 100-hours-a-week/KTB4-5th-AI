@@ -13,13 +13,14 @@ from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
 from app.recipes.context import variation_key
+from app.recipes.preferences import valid_preference_evidence
 from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
 from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v11"
+POLICY_VERSION = "recipe-rerank-v12"
 
 
 # 같은 임박 활용·적합성 그룹에서 구매 부담이 최소 후보보다 2종 이내인 새 임박 주재료를 먼저 확보한다.
@@ -81,7 +82,7 @@ def diversify(rows: list[dict], recent_ids: list[str]) -> list[dict]:
 
 class MealRanker:
     # DB 검색·분량 검증 이후에만 생성하며 슬롯 대기를 포함한 모델 호출을 최대 한 번 수행한다.
-    def __init__(self, reasoner: RecipeReasoner, timeout: float, slots: asyncio.Semaphore, expected_model: str) -> None:
+    def __init__(self, reasoner: RecipeReasoner, timeout: float, slots: asyncio.Semaphore, expected_model: str, max_input_bytes: int = 16000) -> None:
         self.reasoner, self.timeout, self.slots = reasoner, timeout, slots
         self.expected_model = expected_model
         self.model: str | None = None
@@ -89,35 +90,59 @@ class MealRanker:
         self.unavailable = False
         self.warnings: list[str] = []
         self.preference_matches: set[tuple[str, str]] = set()
+        self.preference_evidence: dict[tuple[str, str], str] = {}
+        self.rejected_preference_identities: set[tuple[str, str]] = set()
+        self.evaluated_identities: set[tuple[str, str]] = set()
+        self.max_input_bytes = max_input_bytes
+        self.input_bytes = 0
+        self.candidate_count = 0
+        self.duration_ms = 0.0
 
     # 후보 전체의 ID 순열만 수용한다. 오류·누락·중복은 기본 추천을 지우지 않고 None으로 반환한다.
     async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
         self.preference_matches = set()
+        self.preference_evidence = {}
+        self.rejected_preference_identities = set()
+        self.evaluated_identities = set()
         self.unavailable = False
+        call_started = None
         try:
-            snapshots = compact_candidates(shortlist)
-            payload = {**context, "candidates": snapshots}
-            if len(json.dumps(payload, ensure_ascii=False).encode()) > 24000:
-                payload["candidates"] = compact_candidates(shortlist, brief=True)
-                payload["ingredientColumns"] = ["ingredientNo", "name", "role", "quantityStatus", "relatedStockNames", "unit", "requiredAmount"]
-            # 입력 예산 때문에 후보를 제거하지 않는다. 초과하면 이미 검증한 기본 추천으로 돌아간다.
-            if len(json.dumps(payload, ensure_ascii=False).encode()) > 24000:
-                raise ValueError("RECIPE_CONTEXT_TOO_LARGE")
+            payload, window = pack_rank_input(context, shortlist, self.max_input_bytes)
+            self.input_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+            self.candidate_count = len(window)
+            if len(window) < len(shortlist):
+                self.warnings.append("AI_INPUT_WINDOW_REDUCED")
             self.calls += 1
             started = monotonic()
+            call_started = started
             async with asyncio.timeout(self.timeout), self.slots:
                 payload["executionBudgetSeconds"] = max(0.1, min(60, self.timeout - (monotonic() - started) - 1))
+                self.input_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+                logger.info("recipe_ai_request candidate_count=%d input_bytes=%d format=brief budget_seconds=%.2f", len(window), self.input_bytes, payload["executionBudgetSeconds"])
                 result, model = await self.reasoner.rank(payload)
             if not isinstance(result, RankResult) or model != self.expected_model:
                 raise ValueError("RECIPE_MODEL_OR_SCHEMA_MISMATCH")
-            wanted = set(range(1, len(shortlist) + 1))
-            if len(result.candidateIds) != len(shortlist) or set(result.candidateIds) != wanted:
+            wanted = set(range(1, len(window) + 1))
+            if len(result.candidateIds) != len(window) or set(result.candidateIds) != wanted:
                 raise ValueError("INVALID_RECIPE_RANK_PERMUTATION")
             matched_ids = result.preferenceMatchedCandidateIds
             if len(matched_ids) != len(set(matched_ids)) or not set(matched_ids) <= wanted:
                 raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
-            self.preference_matches = {(shortlist[i - 1]["source"], shortlist[i - 1]["sourceRecipeId"]) for i in matched_ids}
-            ordered = [shortlist[identifier - 1] for identifier in result.candidateIds]
+            evidence = {item.candidateId: item.quote for item in result.preferenceEvidence}
+            if len(evidence) != len(result.preferenceEvidence) or not set(evidence) <= set(matched_ids):
+                raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
+            for identifier in matched_ids:
+                row = window[identifier - 1]
+                quote = evidence.get(identifier, "")
+                if context.get("preferenceTags") and valid_preference_evidence(row, quote, context["preferenceTags"]):
+                    identity = (row["source"], row["sourceRecipeId"])
+                    self.preference_matches.add(identity)
+                    self.preference_evidence[identity] = quote
+                else:
+                    self.rejected_preference_identities.add((row["source"], row["sourceRecipeId"]))
+                    self.warnings.append("AI_PREFERENCE_EVIDENCE_REJECTED")
+            self.evaluated_identities = {(row["source"], row["sourceRecipeId"]) for row in window}
+            ordered = [window[identifier - 1] for identifier in result.candidateIds]
             if context.get("preferenceTags"):
                 ordered = sorted(ordered, key=lambda row: (row["source"], row["sourceRecipeId"]) not in self.preference_matches)
             # AI가 실제 임박 활용·소비기한·적합성의 검증된 우선순위를 뒤집을 수 없다.
@@ -133,6 +158,9 @@ class MealRanker:
             logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s prompt=%s", type(exc).__name__, code, PROMPT_VERSION)
             self.warnings.append("AI_UNAVAILABLE_OR_INVALID")
             return None
+        finally:
+            if call_started is not None:
+                self.duration_ms += (monotonic() - call_started) * 1000
 
 
 # 임박 활용을 요청한 경우 날짜 우선순위 뒤에 적합성 그룹을 붙여 보호할 정렬 키를 반환한다.
@@ -213,14 +241,14 @@ def compact_candidates(shortlist: list[dict], brief: bool = False) -> list[dict]
             urgent = {canonical(name) for name in row["usesExpiringIngredients"]}
             result.append({"candidateId": index, "name": row["name"],
                            "ingredients": [[item["ingredientNo"], item["name"], roles[item["ingredientNo"]]["role"],
-                                            requirements[item["ingredientNo"]]["status"], roles[item["ingredientNo"]]["relatedStockNames"],
-                                            requirements[item["ingredientNo"]].get("unit"), requirements[item["ingredientNo"]].get("requiredAmount")]
+                                            requirements[item["ingredientNo"]]["status"], roles[item["ingredientNo"]]["relatedStockNames"]]
                                            for item in row["ingredients"]],
                            "ownedIngredientNos": [item["ingredientNo"] for item in row["ingredients"] if canonical(item["name"]) in used],
                            "expiringIngredientNos": [item["ingredientNo"] for item in row["ingredients"] if canonical(item["name"]) in urgent],
                            "missingIngredientNos": [item["ingredientNo"] for item in roles.values() if item["missing"]],
                            "eligibilityTier": row["_suitability"]["tier"], "expiryPriority": list(row.get("_expiryPriority", ())),
-                           "steps": [step["instruction"][:100] for step in row["steps"][:2]],
+                           "quantityStatus": row["quantityStatus"],
+                           "steps": [step["instruction"][:80] for step in row["steps"][:2]],
                            "stepCount": len(row["steps"]), "detailsReduced": True, "stepsMayBeTruncated": True})
             continue
         ingredients = []
@@ -240,3 +268,26 @@ def compact_candidates(shortlist: list[dict], brief: bool = False) -> list[dict]
                        "stepCount": len(row["steps"]), "steps": [] if brief else [step["instruction"][:100] for step in row["steps"][:2]],
                        "detailsReduced": brief, "stepsMayBeTruncated": brief or len(row["steps"]) > 2 or any(len(step["instruction"]) > 100 for step in row["steps"])})
     return result
+
+
+# 원문 응답은 보존하고 AI 평가 창만 입력 예산에 맞춘다. 한 후보조차 못 담으면 명시적으로 실패한다.
+def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tuple[dict, list[dict]]:
+    base = {key: value for key, value in context.items() if key != "pantryIngredientNames"}
+    base["inventory"] = [{key: item[key] for key in ("ingredientId", "name", "expirationDate", "storageType") if key in item}
+                         for item in context.get("inventory", [])]
+    base["inventoryDetailsReduced"] = True
+    base["ingredientColumns"] = ["ingredientNo", "name", "role", "quantityStatus", "relatedStockNames"]
+    if len(json.dumps(base, ensure_ascii=False, separators=(",", ":")).encode()) > max_bytes - 64:
+        raise ValueError("RECIPE_CONTEXT_TOO_LARGE")
+    # 남은 재료/분량은 FastAPI가 이미 검증했다. 모델이 빠진 중량을 추측할 필요가 없다.
+    for count in range(len(shortlist), 0, -1):
+        window = shortlist[:count]
+        payload = {**base, "candidates": compact_candidates(window, brief=True), "executionBudgetSeconds": 60.0}
+        if context.get("preferenceTags"):
+            for candidate, row in zip(payload["candidates"], window, strict=True):
+                candidate["preferenceEvidenceOptions"] = list(dict.fromkeys(item["name"] for item in row["ingredients"]
+                    if len(item["name"]) <= 80 and valid_preference_evidence(row, item["name"], context["preferenceTags"])))
+        # 실제 HTTP JSON과 같은 공백 없는 직렬화로 검사하고 실행 예산 숫자 변경 여유도 남긴다.
+        if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= max_bytes - 64:
+            return payload, window
+    raise ValueError("RECIPE_CONTEXT_TOO_LARGE")

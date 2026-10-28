@@ -65,6 +65,8 @@ quantityScope=FOOD_INGREDIENTS다. quantityStatus와 QUANTITY_VERIFIED는 검토
 
 preferenceMatch는 AI 판단 MATCHED, 평가했지만 적합 근거가 없는 NOT_MATCHED, 미평가/실패 UNKNOWN, 무취향 NOT_REQUESTED다. 알레르기 안전 판정이 아니다. 알맞은 결과가 없어도 임의 요리를 생성하지 않으며 기존 후보와 경고를 반환할 수 있다.
 
+MATCHED에는 preferenceEvidence로 원문 인용을 함께 제공한다. 인용이 원문에 없거나 알려진 취향 조건과 모순되면 UNKNOWN으로 처리한다. AI_INPUT_WINDOW_REDUCED는 입력 크기로 AI 평가 범위만 줄였다는 뜻이며 최종 원문/후보를 삭제했다는 뜻은 아니다. trace.aiInputBytes/aiCandidateCount/timingsMs로 마지막 AI 입력과 추천 생성 단계 시간을 확인한다. 큐 대기/콜백 시간은 job의 시각과 로그로 별도 확인한다.
+
 레시피 하나에 당근 3개가 필요한 경우의 inventoryUsage 부분 예시:
 
 ```json

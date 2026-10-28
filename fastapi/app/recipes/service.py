@@ -50,6 +50,7 @@ class RecipeService:
         key = json.dumps([POLICY_VERSION, MATCH_VERSION, TITLE_MATCH_VERSION, PROMPT_VERSION, self.settings.ollama_model, self.settings.recipe_ai_enabled, request.refrigeratorId,
                           request.inventoryFingerprint, excluded, request.recommendationMode, request.limit, request.targetServings,
                           request.strategies, requested_pantry, sorted(request.recentRecipeIds), self.settings.recipe_ai_max_candidates,
+                          self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_input_max_bytes,
                           bool(self.settings.recipe_food_safety_api_key), self.settings.recipe_food_safety_storage_approved,
                           bool(self.settings.recipe_tavily_api_key), sorted(self.settings.recipe_tavily_approved_domains), today.isoformat()], ensure_ascii=False)
         key += json.dumps([request.preferenceTags, request.requestId], ensure_ascii=False)
@@ -71,7 +72,7 @@ class RecipeService:
             names = sorted({canonical(name) for name in original_names})
             query_names = query_variants(original_names)
             expiring = {canonical(item.name) for item in inventory if 0 <= (item.expirationDate - today).days <= 3}
-            ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model)
+            ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model, self.settings.recipe_ai_input_max_bytes)
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit, "preferenceTags": request.preferenceTags,
@@ -87,7 +88,11 @@ class RecipeService:
             def usable(recipe: Recipe) -> bool:
                 return allowed(recipe, query_names, excluded)
 
-            candidates = [recipe for recipe in await self.repository.find(query_names) if usable(recipe)] if names else []
+            lookup_started = monotonic()
+            found = await self.repository.find(query_names) if names else []
+            database_ms = (monotonic() - lookup_started) * 1000
+            validation_started = monotonic()
+            candidates = [recipe for recipe in found if usable(recipe)]
             searches = 1 if names else 0
             candidates = list({(r.source, r.sourceRecipeId): r for r in candidates}.values())
             search_names = list(dict.fromkeys(item.name for item in sorted(inventory, key=lambda item: (item.expirationDate, item.ingredientId))))
@@ -123,6 +128,7 @@ class RecipeService:
             ranked = [score_candidate(recipe) for recipe in candidates]
             ranked.sort(key=lambda item: (-item["score"], item["source"], item["sourceRecipeId"]))
             baseline = build_baseline(ranked, matched_request)
+            validation_ms = (monotonic() - validation_started) * 1000
             # 개수를 채우지 않는다. 아직 일반 추천의 주재료로 활용하지 못한 임박 이름을 찾는다.
             def uncovered(rows: list[dict]) -> list[str]:
                 covered = {canonical(name) for row in rows for name in row["usesExpiringMainIngredients"]}
@@ -190,7 +196,7 @@ class RecipeService:
             if not request.preferenceTags:
                 baseline = vary_baseline(baseline, context["recommendationContext"]["variationSeed"])
                 shortlist = baseline[:self.settings.recipe_ai_max_candidates]
-            ranker.timeout = max(0.1, min(10, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
+            ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
             can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags)) and monotonic() >= self._ai_retry_after
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
             # 취향을 만족한 DB 후보가 없으면 승인 웹 원천을 한 번 보충하고 같은 검증/AI 판단을 적용한다.
@@ -215,20 +221,22 @@ class RecipeService:
                         # 새 웹 후보도 AI 평가 기회를 갖도록 앞쪽 후보를 일부 교체한다. 최종 임박 우선은 유지한다.
                         web_rows = [row for row in baseline if row["source"] == "TAVILY_WEB"]
                         shortlist = (web_rows[:5] + [row for row in shortlist if row["source"] != "TAVILY_WEB"])[:self.settings.recipe_ai_max_candidates]
+                        ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
                         selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and shortlist else None
                         source += "_AND_TAVILY_WEB"
                     if report.unavailable:
                         ranker.warnings.append("WEB_SEARCH_UNAVAILABLE")
                 else:
                     ranker.warnings.append("PREFERENCE_WEB_SEARCH_NOT_CONFIGURED_OR_APPROVED")
-            evaluated = {(row["source"], row["sourceRecipeId"]) for row in shortlist} if selected is not None else set()
+            evaluated = ranker.evaluated_identities
             for row in baseline:
                 identity = (row["source"], row["sourceRecipeId"])
                 row["preferenceMatch"] = ("NOT_REQUESTED" if not request.preferenceTags else "MATCHED" if identity in ranker.preference_matches
-                                          else "NOT_MATCHED" if identity in evaluated else "UNKNOWN")
+                                          else "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities else "UNKNOWN")
                 if row["preferenceMatch"] == "MATCHED":
-                    row["reason"] += f" AI가 요청 취향({', '.join(request.preferenceTags)})에 부합하는 후보로 판단했습니다."
-            if request.preferenceTags and len(baseline) > len(shortlist):
+                    row["preferenceEvidence"] = ranker.preference_evidence[identity]
+                    row["reason"] += f" AI가 요청 취향({', '.join(request.preferenceTags)})의 원문 근거로 '{row['preferenceEvidence']}'를 제시했습니다."
+            if request.preferenceTags and len(baseline) > len(evaluated):
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
             if request.preferenceTags and not ranker.preference_matches:
                 ranker.warnings.append("NO_VERIFIED_PREFERENCE_MATCH")
@@ -251,11 +259,15 @@ class RecipeService:
             chosen_ids = {(row["source"], row["sourceRecipeId"]) for row in selected or []}
             ordered = (selected + [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in chosen_ids]) if selected is not None else baseline
             result = cover_expiring(diversify(ordered, request.recentRecipeIds), matched_request)[:request.limit]
+            if any(row["baseServings"] is None for row in result):
+                ranker.warnings.append("SOURCE_SERVINGS_UNAVAILABLE")
+            if any(usage["allocationStatus"] == "UNRESOLVED" for row in result for usage in row["inventoryUsage"]):
+                ranker.warnings.append("SOURCE_QUANTITIES_UNRESOLVED")
             # 외부 검색용 전체 후보 판정과 달리 응답은 최종 반환한 목록의 활용만 보고한다.
             focus = uncovered(result) if "USE_EXPIRING" in request.strategies else []
             if focus:
                 ranker.warnings.append("UNCOVERED_EXPIRING_INGREDIENTS")
-            ai_identities = {(row["source"], row["sourceRecipeId"]) for row in shortlist}
+            ai_identities = evaluated
             if selected is not None and any((row["source"], row["sourceRecipeId"]) not in ai_identities for row in result):
                 ranker.warnings.append("AI_RANKED_PREFIX_ONLY")
             if set(request.strategies) - {row["strategy"] for row in result} and result:
@@ -268,6 +280,10 @@ class RecipeService:
             logger.info("recipe_candidate_diagnostics metrics=%s",
                         json.dumps({"requestId": request.requestId, **candidate_diagnostics(ranked, len(baseline), len(confirmation_rows))},
                                    ensure_ascii=False, separators=(",", ":")))
+            timings = {"databaseSearchMs": round(database_ms, 3), "initialCandidateEvaluationMs": round(validation_ms, 3),
+                       "aiRankMs": round(ranker.duration_ms, 3), "recommendationMs": round((monotonic() - started) * 1000, 3)}
+            logger.info("recipe_recommendation_timing request_id=%s timings_ms=%s ai_input_bytes=%d ai_candidate_count=%d", request.requestId,
+                        json.dumps(timings, separators=(",", ":")), ranker.input_bytes, ranker.candidate_count)
             return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", refrigeratorId=request.refrigeratorId,
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=[{key: value for key, value in row.items() if not key.startswith("_")} for row in result],
@@ -278,7 +294,8 @@ class RecipeService:
                                           context=context["recommendationContext"],
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls else None,
                                                  "aiCalls": ranker.calls, "searchCount": searches, "candidateCount": len(ranked),
-                                                 "externalSearchCount": int(external_searched), "webSearchCount": web_searches})
+                                                  "externalSearchCount": int(external_searched), "webSearchCount": web_searches,
+                                                  "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings})
 
         result = await self.cache.get_or_load(key, load)
         if {"AI_UNAVAILABLE_OR_INVALID", "AI_TEMPORARILY_UNAVAILABLE", "EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}.intersection(result.warnings):
