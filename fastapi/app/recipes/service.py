@@ -258,6 +258,8 @@ class RecipeService:
                 if row["preferenceMatch"] == "MATCHED":
                     row["preferenceEvidence"] = ranker.preference_evidence[identity]
                     row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
+                elif row["preferenceMatch"] == "NOT_MATCHED":
+                    row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않아 같은 임박 활용 그룹의 취향 일치 후보보다 후순위입니다."
             if request.preferenceTags and len(baseline) > len(evaluated):
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
             if request.preferenceTags and not ranker.preference_matches:

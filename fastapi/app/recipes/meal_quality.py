@@ -43,4 +43,4 @@ def taste_context(row: dict) -> dict:
 # 취향 일치 그룹 안에서만 사용할 구매 부담 단계. 큰 부담도 후보에서 삭제하지 않는다.
 def shopping_band(row: dict) -> int:
     missing = len(row["missingIngredients"])
-    return 0 if missing <= 10 else 1
+    return 0 if missing <= 5 else 1

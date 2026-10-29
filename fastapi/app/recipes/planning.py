@@ -22,7 +22,7 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v16"
+POLICY_VERSION = "recipe-rerank-v17"
 
 
 # 임박 활용 그룹을 보호하고 취향 일치 여부를 먼저 비교한 뒤 재료 분산과 구매 부담을 고려한다.
@@ -37,7 +37,7 @@ def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dic
         name = canonical(item.name)
         dates[name] = min(dates.get(name, item.expirationDate), item.expirationDate)
     pending, selected, covered = list(rows), [], set()
-    group_size = 6 if request.preferenceTags else 4
+    group_size = 5 if request.preferenceTags else 3
     while pending and len(selected) < request.limit:
         best = min(eligibility_tier(row)[:group_size] for row in pending)
         group = [row for row in pending if eligibility_tier(row)[:group_size] == best]
@@ -292,11 +292,13 @@ class MealRanker:
 
 # 임박 활용 다음에 검증된 취향 일치를 비교하고, 부족 재료에 따른 적합성과 구매 부담은 뒤에 둔다.
 def eligibility_tier(row: dict) -> tuple[int, ...]:
-    preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else (0 if row["preferenceMatch"] == "MATCHED" else 1,)
+    preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else ({"MATCHED": 0, "UNKNOWN": 1, "NOT_MATCHED": 2}[row["preferenceMatch"]],)
     if preference:
         preference += (-sum(item["status"] == "MATCHED" for item in row.get("preferenceAssessments", [])),)
     quantity = 0 if row.get("quantityStatus") == "SUFFICIENT" else 1 if row.get("baseServings") is not None else 2
-    prefix = (*row.get("_expiryPriority", ()), *preference, shopping_band(row), quantity, row["_suitability"]["tier"])
+    # 임박 활용/취향이 우선이다. 같은 조건이면 양념을 제외한 부족 식재료 5종 이내를 우대한다.
+    urgent = (-len(set(row.get("usesExpiringMainIngredients", []))), -len(set(row.get("usesExpiringIngredients", []))))
+    prefix = (*row.get("_expiryPriority", ()), *preference, *urgent, shopping_band(row), quantity, row["_suitability"]["tier"])
     return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
 
 
@@ -326,7 +328,7 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             dates = [item.expirationDate for item in request.inventory if canonical(item.name) in {canonical(name) for name in focus}
                      and 0 <= (item.expirationDate - today).days <= 3]
             # 임박 주재료를 먼저 보되, 같은 핵심 활용 그룹에서는 조리 적합성이 날짜보다 앞선다.
-            row["_expiryPriority"] = (0 if urgent_main else 1 if urgent else 2,)
+            row["_expiryPriority"] = (0 if urgent else 1,)
             row["_expiryDetail"] = (min(dates).toordinal(), -len(set(urgent_main))) if dates else (0, 0)
         strategy = "USE_EXPIRING" if urgent and "USE_EXPIRING" in request.strategies else "MINIMIZE_SHOPPING" if "MINIMIZE_SHOPPING" in request.strategies else "SIMPLE_COOKING"
         essential = [item["ingredientNo"] for item in facts["ingredients"] if item["role"] == "MAIN"]
@@ -339,8 +341,8 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             row["feasibility"] = "NEEDS_CHECK"
         if row.get("baseServings") is None:
             row["confirmationReasons"].append("원문 인분이 없어 요청 인분의 필요량을 확정할 수 없습니다.")
-        if len(row["missingIngredients"]) > 10:
-            row["confirmationReasons"].append("추가 식재료가 10종을 초과해 구매 부담이 큰 후보입니다.")
+        if len(row["missingIngredients"]) > 5:
+            row["confirmationReasons"].append("추가 식재료가 5종을 초과합니다. 구매 예산 목표는 2만원이나 가격 정보가 없어 충족 여부는 확인이 필요합니다.")
         if weak_spicy_basis(row):
             row["confirmationReasons"].append("고추장만 소량 표기돼 있어 매운 강도를 확정하기 어렵습니다.")
         if frying_steps(row):
