@@ -124,7 +124,14 @@ class MealRanker:
         self._cached_rows = cached
         self.preference_cache_hits += len(cached)
         reused = bool(cached)
-        all_cached = bool(tags and shortlist and len(cached) == len(shortlist))
+        # 평가 예산 밖 후보 때문에 같은 창을 반복 추론하지 않는다. 창 밖 후보는 기존 UNKNOWN 정책을 유지한다.
+        fitted = shortlist
+        if tags and cached:
+            try:
+                _, fitted = pack_rank_input(context, shortlist, self.max_input_bytes)
+            except ValueError:
+                fitted = []
+        all_cached = bool(tags and fitted and all((row["source"], row["sourceRecipeId"]) in cached for row in fitted))
         if all_cached:
             self.preference_matches.clear()
             self.preference_evidence.clear()
@@ -133,7 +140,9 @@ class MealRanker:
             self.rejected_preference_identities.clear()
             self.evaluated_identities.clear()
             self.unavailable = False
-            selected = shortlist
+            selected = fitted
+            if len(fitted) < len(shortlist):
+                self.warnings.append("AI_INPUT_WINDOW_REDUCED")
             self.model = self.expected_model
         else:
             selected = await self._rank(context, shortlist)
