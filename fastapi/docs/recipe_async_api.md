@@ -69,7 +69,7 @@ MATCHED에는 preferenceEvidence로 원문 인용을 함께 제공한다. 인용
 
 웹 보충의 trace.webDiscoveredCount는 받은 검색 결과 수, webExtractionCalls는 규칙 실패 후 Gemma EXTRACT 시도 수, webParseFailureCounts는 최종 추출 실패 사유별 건수다. timingsMs.webExtractionMs는 해당 모델 호출 대기 포함 시간이다. aiCalls는 RANK와 EXTRACT 시도의 합계이며 recommendationEngine=AI는 최종 RANK 성공을 뜻한다. 추출만 AI를 사용하고 최종 정렬이 폴백인 경우 RULE_FALLBACK일 수 있다. 기존 요청 필드와 레시피 콜백 경로는 유지한다.
 
-v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모리의 검색/검증된 본문 재사용 횟수다. 캐시 재사용 시 webSearchCount 또는 webExtractionCalls가 0이어도 웹 추천이 포함될 수 있다. 취향이 있어도 더 오래된 임박 재료와 조리 적합성 그룹은 보호하며, 같은 조건에서는 검증된 취향 일치를 추가 구매 재료 수보다 먼저 비교한다.
+v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모리의 검색/검증된 본문 재사용 횟수다. 캐시 재사용 시 webSearchCount 또는 webExtractionCalls가 0이어도 웹 추천이 포함될 수 있다. 취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
 
 레시피 하나에 당근 3개가 필요한 경우의 inventoryUsage 부분 예시:
 
@@ -123,11 +123,11 @@ DB 사용 환경은 022_recipe_recommendation_results.sql 적용이 필요하다
 ]
 ```
 
-MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch=MATCHED는 태그 하나 이상 충족을 뜻한다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 같은 임박 활용 그룹에서는 취향 일치와 충족 태그 수를 부족 재료보다 먼저 비교한다.
+MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch=MATCHED는 태그 하나 이상 충족을 뜻한다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
 
 ## 판정 재사용/오류 추적
 
-trace.preferenceDecisionCacheHits는 해당 추천 실행에서 재사용한 레시피별 취향 판정 수다. 전부 재사용하면 recommendationEngine=AI여도 aiCalls=0일 수 있다. PREFERENCE_DECISION_CACHE_USED 경고로 구분한다. 결과 전체 캐시가 적중한 응답의 trace는 원본 생성 시점의 값이다.
+trace.preferenceDecisionCacheHits는 해당 추천 실행에서 재사용한 레시피별 취향 판정 수다. 전부 재사용하면 recommendationEngine=AI여도 aiCalls=0일 수 있다. PREFERENCE_DECISION_CACHE_USED 경고로 구분한다. trace.recommendationCacheHit는 완료 추천 재사용 또는 동시 계산 공유입니다. 재사용 요청은 aiCalls / 검색 수 / 입력 크기 등의 작업 카운터가 0이며 timingsMs는 현재 요청의 recommendationMs입니다. recommendationId / generatedAt / 후보 진단은 원본 스냅샷입니다. RECOMMENDATION_SNAPSHOT_REUSED 경고로 구분합니다. trace.candidateCoverage는 임박 주재료별 eligible / shortlisted / evaluated / recommended 수이며 정확도나 전체 DB의 취향 적합 후보 수가 아닙니다.
 
 AI_CIRCUIT_OPEN은 연결/과부하 일시 장애가 연속되어 원격 RANK 호출을 쉬는 상태이며 미평가 취향은 UNKNOWN이다. AI_TRANSIENT_RETRY는 같은 전체 시간 예산 안에서 실제 1회 재시도를 수행한 경우다. 입력/스키마/유효하지 않은 모델 출력 한 건으로 후속 사용자 요청을 막지 않는다. 캐시는 프로세스 내 최대 512개/10분이며 서버 재시작/다른 replica 간 지속성을 보증하지 않는다. SQL 변경은 없다.
 
@@ -181,6 +181,8 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
 ### 결과 조회 JSON 예시
 
 전체 형태가 확인되도록 완료 예시를 제공합니다. 아래는 실제 Dev 무취향 시험 응답에서 recommendations의 1개와 빈 확인 후보 배열만 발췌한 형식 예시입니다. trace/원천/필드 값은 해당 시험의 값이며 새로운 호출의 고정 결과가 아닙니다.
+
+이 예시의 요청 재고는 순두부 400g / 애호박 200g / 대파 100g / 계란 200g / 팽이버섯 150g입니다. inventoryUsage는 레시피 재료 목록이 아니라 요청 당시 유효 재고 전체의 사용 계획이므로, 이 요리에 없는 애호박 / 대파 / 계란 / 팽이버섯도 allocationStatus=UNUSED로 포함됩니다. 순두부는 레시피에 매칭되지만 baseServings=null로 요청 인분의 필요량을 계산하지 못해 UNRESOLVED입니다. usedAmount=0은 실제로 필요하지 않다는 뜻이 아닙니다. ingredientId는 냉장고 재고 ID, ingredientNo는 레시피 내부 재료 번호이며 서로 다른 번호 체계입니다.
 
 <details>
 <summary>COMPLETED 응답 JSON 펼치기</summary>
@@ -403,10 +405,6 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
     "uncoveredExpiringIngredients": [],
     "generatedAt": "2026-10-29T05:14:15.435642Z",
     "recommendationEngine": "AI",
-    "mealPlan": {
-      "focusIngredientIds": [],
-      "ideas": []
-    },
     "warnings": [
       "CONFIRMATION_CANDIDATES_SEPARATED",
       "MISSING_INGREDIENTS_REQUIRE_SHOPPING",
@@ -458,3 +456,17 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
 </details>
 
 QUEUED/PROCESSING 상태에서는 result/error/completedAt이 null입니다. FAILED에서는 result=null이고 error에 code/message/retryable을 제공합니다. 상태별 필드 목록은 RecipeJobView 표와 같습니다.
+
+## 레시피 추천 처리 경계와 확정 정책
+
+취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
+
+원천 자체가 없는 임박 주재료는 먼저 보충할 수 있습니다. 취향 부족 보충은 해당 재료의 적합 DB 후보를 모두 정상 평가했는데도 MATCHED가 없을 때 실행합니다. 평가 창 밖 UNKNOWN을 후보 부재로 단정하지 않습니다. 후보가 적은 임박 재료의 대표성을 먼저 확보하고 잔여 슬롯으로 작은 후보군의 평가를 완성합니다.
+
+외부 보충은 한 추천에서 최대 한 번, RECIPE_SUPPLY_TIMEOUT_SECONDS 기본 8초 / 범위 1~20초이며 공식 원천 / Tavily / 추출이 공유합니다. 공식 원천 대기는 최대 3초이고 전체 AI 기본 45초 예산의 잔여시간도 넘지 않습니다. RANK는 최대 두 단계, 각 단계 기본 20초와 전체 잔여시간 중 작은 값으로 제한합니다. 보충 시간 초과는 RECIPE_SUPPLY_BUDGET_EXHAUSTED로 구분하고 검증된 추천을 적게 반환합니다. 전체 큐 / DB / 콜백 SLA를 뜻하지 않습니다.
+
+취향이 있으면 requestId를 제외한 재고 스냅샷 / 냉장고 / 태그 집합 / 인분 / 제외 조건 / 최근 추천 / 정책 / 모델 / 공급자 설정 / 한국 날짜와 시간대를 기준으로 기본 300초 같은 추천을 재사용합니다. 무취향은 요청 seed를 구분해 동등 후보를 다양화합니다. 멱등 접수의 requestId 검증은 유지합니다. 캐시는 프로세스 메모리이며 재시작 / replica 공유는 보장하지 않습니다.
+
+trace.recommendationCacheHit는 완료 추천 재사용 또는 동시 계산 공유입니다. 재사용 요청은 aiCalls / 검색 수 / 입력 크기 등의 작업 카운터가 0이며 timingsMs는 현재 요청의 recommendationMs입니다. recommendationId / generatedAt / 후보 진단은 원본 스냅샷입니다. RECOMMENDATION_SNAPSHOT_REUSED 경고로 구분합니다. trace.candidateCoverage는 임박 주재료별 eligible / shortlisted / evaluated / recommended 수이며 정확도나 전체 DB의 취향 적합 후보 수가 아닙니다.
+
+부족 식재료가 있으면 SHOPPING_COST_UNVERIFIED와 2만원 충족 미확인 사유를 표시합니다. 5종은 비용 환산값이 아니며 실제 가격을 생성하지 않습니다. source_processing은 원문 지문별 성공 / 실패 유예와 동시 추출 공유, replenishment는 공급 예산과 저장 승인, result_cache는 추천 스냅샷, selection은 최종 선정을 담당합니다. 독립 수집 작업 / 영속 취향 프로필은 포함하지 않습니다. 새 SQL 없이 FastAPI와 Worker recipe-grounded-v8을 함께 배포합니다.

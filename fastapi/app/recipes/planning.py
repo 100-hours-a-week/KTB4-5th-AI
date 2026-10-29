@@ -12,79 +12,29 @@ import httpx
 from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
+from app.recipes.candidate_pool import representative_candidates
 from app.recipes.context import variation_key
-from app.recipes.meal_quality import frying_steps, shopping_band, taste_context, weak_spicy_basis
+from app.recipes.meal_quality import frying_steps, taste_context, weak_spicy_basis
 from app.recipes.preferences import valid_preference_evidence
 from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, transient_failure
 from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
+from app.recipes.selection import candidate_priority, select_recommendations
 from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v17"
+POLICY_VERSION = "recipe-rerank-v18"
 
 
-# 임박 활용 그룹을 보호하고 취향 일치 여부를 먼저 비교한 뒤 재료 분산과 구매 부담을 고려한다.
+# 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
 def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dict]:
-    if "USE_EXPIRING" not in request.strategies:
-        return rows
-    dates = {}
-    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
-    for item in request.inventory:
-        if not 0 <= (item.expirationDate - today).days <= 3:
-            continue
-        name = canonical(item.name)
-        dates[name] = min(dates.get(name, item.expirationDate), item.expirationDate)
-    pending, selected, covered = list(rows), [], set()
-    group_size = 5 if request.preferenceTags else 3
-    while pending and len(selected) < request.limit:
-        best = min(eligibility_tier(row)[:group_size] for row in pending)
-        group = [row for row in pending if eligibility_tier(row)[:group_size] == best]
-        minimum_missing = min(len(row["missingIngredients"]) for row in group)
-        fresh = [(row, {canonical(name) for name in row["usesExpiringMainIngredients"]} - covered) for row in group
-                 if row.get("preferenceMatch") == "MATCHED" or len(row["missingIngredients"]) <= minimum_missing + 2]
-        fresh = [(row, names) for row, names in fresh if names]
-        if fresh:
-            earliest = min(min(dates[name] for name in names) for _, names in fresh)
-            fresh = [(row, names) for row, names in fresh if min(dates[name] for name in names) == earliest]
-            preferred = [(row, names) for row, names in fresh if row.get("preferenceMatch") == "MATCHED"] or fresh
-            minimum_missing = min(len(row["missingIngredients"]) for row, _ in preferred)
-            affordable = [(row, names) for row, names in preferred if len(row["missingIngredients"]) <= minimum_missing + 2]
-            row, newly_used = min(affordable, key=lambda pair: (-len(pair[1]), len(pair[0]["missingIngredients"])))
-            row = dict(row)
-            row["reason"] += f" 임박 재료 분산 활용: {', '.join(sorted(newly_used))}를 앞선 추천과 추가로 활용하도록 선정했습니다."
-        else:
-            preferred = [row for row in group if row.get("preferenceMatch") == "MATCHED"] or group
-            minimum_missing = min(len(row["missingIngredients"]) for row in preferred)
-            affordable = [row for row in preferred if len(row["missingIngredients"]) <= minimum_missing + 2]
-            row = affordable[0]
-        selected.append(row)
-        covered.update(canonical(name) for name in row["usesExpiringMainIngredients"])
-        pending.remove(next(item for item in pending if (item["source"], item["sourceRecipeId"]) == (row["source"], row["sourceRecipeId"])))
-    return selected
+    return select_recommendations(rows, request)
 
 
-# 임박·적합성 우선순위가 같은 후보 안에서만 최근 추천과 동일 주재료 반복을 뒤로 미룬다.
+# 기존 도구의 순서 보존용 경로다. 운영 추천은 select_recommendations에서 다양성까지 한 번에 계산한다.
 def diversify(rows: list[dict], recent_ids: list[str]) -> list[dict]:
-    pending, result, seen_main = list(rows), [], set()
-    recent = set(recent_ids)
-    while pending:
-        priority = min(eligibility_tier(row) for row in pending)
-        candidates = [row for row in pending if eligibility_tier(row) == priority]
-        def penalty(row: dict) -> tuple[int, int]:
-            main = frozenset(canonical(item["name"]) for item in row["_suitability"]["ingredients"] if item["role"] == "MAIN")
-            return (int(f"{row['source']}:{row['sourceRecipeId']}" in recent), int(bool(main) and main in seen_main))
-        selected = min(candidates, key=penalty)
-        selected = dict(selected)
-        repeated, duplicate = penalty(selected)
-        selected["scoreBreakdown"] = {**selected["scoreBreakdown"], "variety": 0.0 if repeated or duplicate else 1.0}
-        if repeated or duplicate:
-            selected["reason"] += " 같은 임박·적합성 조건에서 최근 추천 또는 주재료 중복을 고려했습니다."
-        result.append(selected)
-        seen_main.add(frozenset(canonical(item["name"]) for item in selected["_suitability"]["ingredients"] if item["role"] == "MAIN"))
-        pending.remove(next(row for row in pending if row["source"] == selected["source"] and row["sourceRecipeId"] == selected["sourceRecipeId"]))
-    return result
+    return rows
 
 
 class MealRanker:
@@ -110,6 +60,27 @@ class MealRanker:
         self.circuit = RecipeCircuit()
         self.preference_cache_hits = 0
         self._cached_rows: dict[tuple[str, str], dict[str, str]] = {}
+
+    # 현재 평가 창 밖이라도 같은 원문 / 취향의 검증된 판정이 있으면 후보 풀에 적용한다.
+    def hydrate(self, context: dict, rows: list[dict]) -> None:
+        tags = context.get("preferenceTags", [])
+        if not tags:
+            return
+        for row in rows:
+            identity = (row["source"], row["sourceRecipeId"])
+            if identity in self.evaluated_identities:
+                continue
+            evidence = self.decisions.get(self.decisions.key(row, tags, self.expected_model, PROMPT_VERSION, POLICY_VERSION))
+            if evidence is None:
+                continue
+            self.evaluated_identities.add(identity)
+            self.preference_cache_hits += 1
+            if evidence:
+                self.preference_matches.add(identity)
+                self.preference_tag_evidence[identity] = evidence
+                self.preference_evidence[identity] = next(iter(evidence.values()))
+        if self.preference_cache_hits:
+            self.warnings.append("PREFERENCE_DECISION_CACHE_USED")
 
     # 원문/태그의 검증 판정을 재사용하며 순위와 재고 소모량은 현재 요청에서 다시 계산한다.
     async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
@@ -290,16 +261,9 @@ class MealRanker:
                 self.duration_ms += (monotonic() - call_started) * 1000
 
 
-# 임박 활용 다음에 검증된 취향 일치를 비교하고, 부족 재료에 따른 적합성과 구매 부담은 뒤에 둔다.
+# 사전 후보 정렬과 최종 선정이 같은 정적 우선순위를 사용하도록 위임한다.
 def eligibility_tier(row: dict) -> tuple[int, ...]:
-    preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else ({"MATCHED": 0, "UNKNOWN": 1, "NOT_MATCHED": 2}[row["preferenceMatch"]],)
-    if preference:
-        preference += (-sum(item["status"] == "MATCHED" for item in row.get("preferenceAssessments", [])),)
-    quantity = 0 if row.get("quantityStatus") == "SUFFICIENT" else 1 if row.get("baseServings") is not None else 2
-    # 임박 활용/취향이 우선이다. 같은 조건이면 양념을 제외한 부족 식재료 5종 이내를 우대한다.
-    urgent = (-len(set(row.get("usesExpiringMainIngredients", []))), -len(set(row.get("usesExpiringIngredients", []))))
-    prefix = (*row.get("_expiryPriority", ()), *preference, *urgent, shopping_band(row), quantity, row["_suitability"]["tier"])
-    return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
+    return candidate_priority(row)
 
 
 # 부족한 주재료도 구매 필요 후보로 포함한다. 정확히 보유한 식재료가 없는 계열 후보만 따로 둔다.
@@ -358,8 +322,8 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             warning += f" 추가로 준비할 식재료: {', '.join(row['missingIngredients'])}."
         row["reason"] = (f"보유 재료 {len(row['usesInventory'])}종 사용, 추가로 확인할 재료 {len(row['missingIngredients'])}종입니다. "
                          f"{urgent_text} 원문 조리 {len(row['steps'])}단계이며 분량 상태는 {row['quantityStatus']}입니다.{warning}")
-        if len(row["missingIngredients"]) > 10:
-            row["reason"] += " 추가 식재료가 10종을 초과해 같은 취향 조건의 구매 부담이 적은 후보 뒤에서 비교합니다."
+        if row["missingIngredients"]:
+            row["reason"] += " 가격 정보가 없어 추가 구매 2만원 예산 충족 여부는 미확인입니다."
         rows.append(row)
     rows.sort(key=lambda row: (*eligibility_tier(row), len(row["steps"]) if request.strategies == ["SIMPLE_COOKING"] else 0,
                               len(row["missingIngredients"]), *row.get("_expiryDetail", ()), -row["score"], row["source"], row["sourceRecipeId"]))
@@ -420,6 +384,7 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
     base["ingredientColumns"] = ["ingredientNo", "name", "role", "quantityStatus", "relatedStockNames"]
     if len(json.dumps(base, ensure_ascii=False, separators=(",", ":")).encode()) > max_bytes - 64:
         raise ValueError("RECIPE_CONTEXT_TOO_LARGE")
+    shortlist = representative_candidates(shortlist, len(shortlist))
     # 남은 재료/분량은 FastAPI가 이미 검증했다. 모델이 빠진 중량을 추측할 필요가 없다.
     for count in range(len(shortlist), 0, -1):
         window = shortlist[:count]
@@ -427,8 +392,10 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
         if context.get("preferenceTags"):
             for candidate, row in zip(payload["candidates"], window, strict=True):
                 candidate["tasteContext"] = taste_context(row)
-                candidate["preferenceEvidenceOptions"] = list(dict.fromkeys(item["name"] for item in row["ingredients"]
-                    if len(item["name"]) <= 80 and any(valid_preference_evidence(row, item["name"], [tag]) for tag in context["preferenceTags"])))
+                quotes = [item["name"] for item in row["ingredients"] if len(item["name"]) <= 80]
+                quotes.extend(text[:80] for text in candidate["tasteContext"]["cookingEvidence"])
+                candidate["preferenceEvidenceOptions"] = list(dict.fromkeys(quote for quote in quotes
+                    if any(valid_preference_evidence(row, quote, [tag]) for tag in context["preferenceTags"])))
         # 실제 HTTP JSON과 같은 공백 없는 직렬화로 검사하고 실행 예산 숫자 변경 여유도 남긴다.
         if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= max_bytes - 64:
             return payload, window

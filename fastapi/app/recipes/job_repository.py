@@ -1,5 +1,7 @@
 """레시피 완료/실패 결과만 영속화한다. 대기 큐는 FastAPI 메모리에서 관리한다."""
 
+import json
+
 from app.errors import DependencyUnavailable
 from app.recipes.repository import RecipeRepository
 from app.recipes.schemas import RecipeJobView
@@ -23,7 +25,13 @@ class RecipeJobRepository:
         try:
             pool = await self.repository.pool.get()
             row = await pool.fetchrow(f"SELECT request_hash,snapshot FROM recipe_ai.recommendation_results WHERE {column}=$1", value)
-            return (row["request_hash"], RecipeJobView.model_validate_json(row["snapshot"])) if row else None
+            if row is None:
+                return None
+            snapshot = json.loads(row["snapshot"])
+            # 제거 전 저장된 결과도 조회하되 폐기한 예약 필드는 다시 반환하지 않는다.
+            if isinstance(snapshot.get("result"), dict):
+                snapshot["result"].pop("mealPlan", None)
+            return row["request_hash"], RecipeJobView.model_validate(snapshot)
         except Exception as exc:
             raise DependencyUnavailable("레시피 작업 이력을 조회하지 못했습니다. DB 연결과 022 마이그레이션을 확인하세요.") from exc
 

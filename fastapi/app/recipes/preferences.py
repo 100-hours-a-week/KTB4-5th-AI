@@ -1,5 +1,6 @@
 """AI의 취향 적합 응답에 원문 근거를 요구한다. 알레르기/영양 판단은 하지 않는다."""
 
+from app.recipes.candidate_pool import representative_candidates
 from app.recipes.meal_quality import frying_steps, weak_spicy_basis
 from app.recipes.retrieval import canonical
 from app.recipes.suitability import ingredient_role
@@ -12,7 +13,7 @@ MILD_TAGS = {"담백한거", "담백한맛", "담백한음식", "순한거", "�
 # 인용문은 실제 전달한 제목/재료/단계의 일부여야 한다. 알려진 매운맛 태그에는 명시적 매운 근거를 요구한다.
 def valid_preference_evidence(row: dict, quote: str, tags: list[str]) -> bool:
     text = canonical(quote)
-    sources = [row["name"], *(item["name"] for item in row["ingredients"]), *(step["instruction"][:80] for step in row["steps"][:2])]
+    sources = [row["name"], *(item["name"] for item in row["ingredients"]), *(step["instruction"] for step in row["steps"])]
     if len(text) < 2 or not any(text in canonical(source) for source in sources):
         return False
     if {canonical(tag) for tag in tags}.intersection(SPICY_TAGS) and not any(word in text for word in SPICY_EVIDENCE):
@@ -59,4 +60,4 @@ def preference_shortlist(rows: list[dict], tags: list[str], limit: int) -> list[
     ordered = sorted(rows, key=lambda row: (row.get("_expiryPriority", ()),
                                             0 if row["source"] == "TAVILY_WEB" else 1,
                                             0 if explicit_preference_signal(row, tags) else 1))
-    return ordered[:min(limit, 12)]
+    return representative_candidates(ordered, min(limit, 12))

@@ -213,11 +213,13 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v16"
+    policyVersion: str = "recipe-rerank-v18"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
     preferenceDecisionCacheHits: int = 0
+    recommendationCacheHit: bool = False
+    candidateCoverage: dict[str, dict[str, int]] = Field(default_factory=dict)
     searchCount: int = 0
     candidateCount: int = 0
     externalSearchCount: int = 0
@@ -232,11 +234,6 @@ class RecommendationTrace(Contract):
     timingsMs: dict[str, float] = Field(default_factory=dict)
 
 
-class MealPlan(Contract):
-    focusIngredientIds: list[int] = Field(default_factory=list)
-    ideas: list[str] = Field(default_factory=list)
-
-
 class RecommendationResponse(Contract):
     recommendationId: str
     refrigeratorId: int
@@ -247,7 +244,6 @@ class RecommendationResponse(Contract):
     uncoveredExpiringIngredients: list[str] = Field(default_factory=list)
     generatedAt: datetime
     recommendationEngine: Literal["AI", "RULE_FALLBACK", "EMPTY"] = "RULE_FALLBACK"
-    mealPlan: MealPlan = Field(default_factory=MealPlan)
     warnings: list[str] = Field(default_factory=list)
     trace: RecommendationTrace = Field(default_factory=RecommendationTrace)
     preferenceTags: list[str] = Field(default_factory=list)
