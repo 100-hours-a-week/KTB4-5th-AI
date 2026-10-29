@@ -17,6 +17,7 @@ from app.recipes.diagnostics import candidate_diagnostics
 from app.recipes.evaluation import compare_rankings
 from app.recipes.food_safety import FoodSafetyProvider
 from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline, cover_expiring, diversify, vary_baseline
+from app.recipes.preferences import preference_search_focus, preference_shortlist
 from app.recipes.quantities import assess_quantities
 from app.recipes.repository import RecipeRepository
 from app.recipes.retrieval import MATCH_VERSION, TITLE_MATCH_VERSION, allowed, canonical, is_excluded, missing_named_ingredients, query_variants
@@ -160,7 +161,8 @@ class RecipeService:
                 else:
                     ranker.warnings.append("EXTERNAL_REPLENISHMENT_NOT_CONFIGURED")
             focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
-            # 구조화 원천 보충 뒤에도 핵심 임박 재료가 빠지면 최후로 승인된 웹 원천을 검색한다.
+            # 명시적 취향 근거가 없는 임박 재료는 정렬 전에 보충해 RANK 두 번을 피한다.
+            focus = list(dict.fromkeys([*preference_search_focus(inventory, baseline, request.preferenceTags), *focus]))
             if names and (focus or not baseline):
                 if self.settings.recipe_tavily_api_key:
                     report = await self.web_provider.search(focus or search_names[:1], search_names, timeout_seconds=max(0.1, external_deadline - monotonic()),
@@ -197,7 +199,7 @@ class RecipeService:
                 ranker.warnings.append("MISSING_INGREDIENTS_REQUIRE_SHOPPING")
             if unresolved_count:
                 ranker.warnings.append("UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK")
-            shortlist = baseline[:self.settings.recipe_ai_max_candidates]
+            shortlist = preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)
             if not request.preferenceTags:
                 baseline = vary_baseline(baseline, context["recommendationContext"]["variationSeed"])
                 shortlist = baseline[:self.settings.recipe_ai_max_candidates]
@@ -206,10 +208,11 @@ class RecipeService:
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
             # 웹 보충 예산에 DB 후보의 LLM 정렬 시간을 중복 차감하지 않는다. 전체 AI 예산은 별도로 유지한다.
             external_deadline += ranker.duration_ms / 1000
-            # 취향을 만족한 DB 후보가 없으면 승인 웹 원천을 한 번 보충하고 같은 검증/AI 판단을 적용한다.
-            if request.preferenceTags and not ranker.preference_matches:
-                if self.settings.recipe_tavily_api_key and not web_searches:
-                    report = await self.web_provider.search(search_names[:2], search_names,
+            preference_focus = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches)
+            # 다른 재료의 취향 일치만으로 임박 주재료의 추가 탐색을 중단하지 않는다.
+            if request.preferenceTags and (preference_focus or not ranker.preference_matches):
+                if self.settings.recipe_tavily_api_key and not web_reports:
+                    report = await self.web_provider.search(preference_focus or search_names[:2], search_names,
                                                             timeout_seconds=max(0.1, external_deadline - monotonic()),
                                                             preference_tags=request.preferenceTags)
                     web_searches += report.searches
@@ -228,16 +231,16 @@ class RecipeService:
                     if added:
                         ranked = list(merged.values())
                         baseline = build_baseline(ranked, matched_request)
-                        shortlist = baseline[:self.settings.recipe_ai_max_candidates]
+                        shortlist = preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)
                         # 새 웹 후보도 AI 평가 기회를 갖도록 앞쪽 후보를 일부 교체한다. 최종 임박 우선은 유지한다.
                         web_rows = [row for row in baseline if row["source"] == "TAVILY_WEB"]
-                        shortlist = (web_rows[:5] + [row for row in shortlist if row["source"] != "TAVILY_WEB"])[:self.settings.recipe_ai_max_candidates]
+                        shortlist = (web_rows[:5] + [row for row in shortlist if row["source"] != "TAVILY_WEB"])[:min(self.settings.recipe_ai_max_candidates, 12)]
                         ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
                         selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and shortlist else None
                         source += "_AND_TAVILY_WEB"
                     if report.unavailable:
                         ranker.warnings.append("WEB_SEARCH_UNAVAILABLE")
-                else:
+                elif not self.settings.recipe_tavily_api_key:
                     ranker.warnings.append("PREFERENCE_WEB_SEARCH_NOT_CONFIGURED")
             evaluated = ranker.evaluated_identities
             for row in baseline:
@@ -314,6 +317,8 @@ class RecipeService:
                                                   "externalSearchCount": int(external_searched), "webSearchCount": web_searches,
                                                   "webDiscoveredCount": sum(report.discovered for report in web_reports),
                                                   "webExtractionCalls": extraction_calls, "webParseFailureCounts": web_failures,
+                                                  "webSearchCacheHits": sum(report.search_cache_hits for report in web_reports),
+                                                  "webExtractionCacheHits": sum(report.extraction_cache_hits for report in web_reports),
                                                   "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings})
 
         result = await self.cache.get_or_load(key, load)

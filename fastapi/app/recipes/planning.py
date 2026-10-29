@@ -1,4 +1,4 @@
-"""검증된 레시피의 기본 추천을 구성하고 단일 AI 호출로 순서만 조정한다."""
+"""검증된 레시피의 기본 추천을 구성하고 AI 평가로 취향과 순서를 조정한다."""
 
 import asyncio
 import json
@@ -20,7 +20,7 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v12"
+POLICY_VERSION = "recipe-rerank-v13"
 
 
 # 같은 임박 활용·적합성 그룹에서 구매 부담이 최소 후보보다 2종 이내인 새 임박 주재료를 먼저 확보한다.
@@ -40,18 +40,22 @@ def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dic
         group = [row for row in pending if eligibility_tier(row)[:2] == best]
         minimum_missing = min(len(row["missingIngredients"]) for row in group)
         fresh = [(row, {canonical(name) for name in row["usesExpiringMainIngredients"]} - covered) for row in group
-                 if len(row["missingIngredients"]) <= minimum_missing + 2]
+                 if row.get("preferenceMatch") == "MATCHED" or len(row["missingIngredients"]) <= minimum_missing + 2]
         fresh = [(row, names) for row, names in fresh if names]
         if fresh:
-            # 날짜·새로운 임박 재료 수·구매 부담이 같으면 기존 AI/기본 순서를 유지한다.
-            row, newly_used = min(fresh, key=lambda pair: (min(dates[name] for name in pair[1]), -len(pair[1]),
-                                                          0 if pair[0].get("preferenceMatch") == "MATCHED" else 1,
-                                                          len(pair[0]["missingIngredients"])))
+            earliest = min(min(dates[name] for name in names) for _, names in fresh)
+            fresh = [(row, names) for row, names in fresh if min(dates[name] for name in names) == earliest]
+            preferred = [(row, names) for row, names in fresh if row.get("preferenceMatch") == "MATCHED"] or fresh
+            minimum_missing = min(len(row["missingIngredients"]) for row, _ in preferred)
+            affordable = [(row, names) for row, names in preferred if len(row["missingIngredients"]) <= minimum_missing + 2]
+            row, newly_used = min(affordable, key=lambda pair: (-len(pair[1]), len(pair[0]["missingIngredients"])))
             row = dict(row)
             row["reason"] += f" 임박 재료 분산 활용: {', '.join(sorted(newly_used))}를 앞선 추천과 추가로 활용하도록 선정했습니다."
         else:
-            affordable = [row for row in group if len(row["missingIngredients"]) <= minimum_missing + 2]
-            row = min(affordable, key=lambda row: 0 if row.get("preferenceMatch") == "MATCHED" else 1)
+            preferred = [row for row in group if row.get("preferenceMatch") == "MATCHED"] or group
+            minimum_missing = min(len(row["missingIngredients"]) for row in preferred)
+            affordable = [row for row in preferred if len(row["missingIngredients"]) <= minimum_missing + 2]
+            row = affordable[0]
         selected.append(row)
         covered.update(canonical(name) for name in row["usesExpiringMainIngredients"])
         pending.remove(next(item for item in pending if (item["source"], item["sourceRecipeId"]) == (row["source"], row["sourceRecipeId"])))
@@ -145,6 +149,8 @@ class MealRanker:
             ordered = [window[identifier - 1] for identifier in result.candidateIds]
             if context.get("preferenceTags"):
                 ordered = sorted(ordered, key=lambda row: (row["source"], row["sourceRecipeId"]) not in self.preference_matches)
+                for row in ordered:
+                    row["preferenceMatch"] = "MATCHED" if (row["source"], row["sourceRecipeId"]) in self.preference_matches else "UNKNOWN"
             # AI가 실제 임박 활용·소비기한·적합성의 검증된 우선순위를 뒤집을 수 없다.
             constrained = sorted(ordered, key=eligibility_tier)
             if constrained != ordered:
@@ -166,7 +172,8 @@ class MealRanker:
 # 임박 활용을 요청한 경우 날짜 우선순위 뒤에 적합성 그룹을 붙여 보호할 정렬 키를 반환한다.
 def eligibility_tier(row: dict) -> tuple[int, ...]:
     prefix = (*row.get("_expiryPriority", ()), row["_suitability"]["tier"])
-    return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
+    preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else (0 if row["preferenceMatch"] == "MATCHED" else 1,)
+    return (*prefix, *preference, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else (*prefix, *preference)
 
 
 # 부족한 주재료도 구매 필요 후보로 포함한다. 정확히 보유한 식재료가 없는 계열 후보만 따로 둔다.

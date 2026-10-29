@@ -5,18 +5,23 @@ import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from time import monotonic
 
 import httpx
 
+from app.adapters._cache import BoundedAsyncCache
 from app.config import Settings
 from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
+from app.recipes.ai_contract import PROMPT_VERSION
 from app.recipes.ingredients import NAME, parse_ingredients, parse_piece
+from app.recipes.preferences import explicit_preference_signal, search_preference_terms
+from app.recipes.retrieval import canonical
 from app.recipes.schemas import Ingredient, Recipe, Step
 from app.recipes.tavily import DiscoveryHit, TavilyDiscovery
-from app.recipes.web_extraction import INGREDIENT_LABELS, STEP_LABELS, mixed_batch, section_label, source_servings, source_text, validate_extraction
+from app.recipes.web_extraction import INGREDIENT_LABELS, STEP_LABELS, mixed_batch, numbered_instructions, section_label, source_servings, source_text, unmeasured_source_ingredient, validate_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,8 @@ class WebSearchResult:
     failure_reasons: dict[str, int] = field(default_factory=dict)
     extraction_calls: int = 0
     extraction_ms: float = 0
+    search_cache_hits: int = 0
+    extraction_cache_hits: int = 0
 
 
 # schema.org의 Recipe와 HowToSection을 제한된 깊이로 읽고 순서를 유지한다.
@@ -85,7 +92,10 @@ def markdown_recipe(content: str, fallback_title: str = "") -> dict | None:
     def lines(text: str) -> list[str]:
         return [re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", line).strip() for line in text.splitlines() if line.strip()]
     servings = source_servings(content)
-    return {"@type": "Recipe", "name": title, "recipeIngredient": lines("\n".join(ingredients)), "recipeInstructions": lines("\n".join(instructions)),
+    steps = numbered_instructions(instructions)
+    if steps == []:
+        return None
+    return {"@type": "Recipe", "name": title, "recipeIngredient": lines("\n".join(ingredients)), "recipeInstructions": steps or lines("\n".join(instructions)),
             "recipeYield": f"{servings}인분" if servings else None}
 
 
@@ -130,6 +140,8 @@ def parse_web_recipe(hit: DiscoveryHit) -> Recipe | None:
                     ingredients.extend(item.model_copy(update={"ingredientNo": offset + index}) for index, item in enumerate(parsed, 1))
                 elif NAME.fullmatch(text) and not re.search(r"\d|\s", text) and len(text) <= 30 and not re.search(r"합니다|하세요|넣고|넣어", text):
                     ingredients.append(Ingredient(ingredientNo=len(ingredients) + 1, name=text, amountText=text))
+                elif (unmeasured := unmeasured_source_ingredient(text, len(ingredients) + 1)) is not None:
+                    ingredients.append(unmeasured)
                 else:
                     return None
         steps = [Step(stepNo=index, instruction=text) for index, text in enumerate(instruction_texts(row.get("recipeInstructions")), 1)]
@@ -162,6 +174,8 @@ class WebRecipeProvider:
         self.settings = settings
         self.discovery = discovery or TavilyDiscovery(settings)
         self.reasoner = reasoner
+        self._search_cache = BoundedAsyncCache[list[DiscoveryHit]](16, min(settings.recipe_cache_ttl_seconds, 120))
+        self._parsed_cache: OrderedDict[str, tuple[float, Recipe]] = OrderedDict()
 
     # 활용되지 않은 임박 재료를 최대 2개 검색한다. 서명 URL·냉장고 ID·재고량은 전달하지 않는다.
     async def search(self, focus: list[str], companions: list[str], timeout_seconds: float = 30, preference_tags: list[str] | None = None) -> WebSearchResult:
@@ -170,12 +184,33 @@ class WebRecipeProvider:
         try:
             async with asyncio.timeout(timeout_seconds):
                 for name in list(dict.fromkeys(focus))[:2]:
-                    query = " ".join([name, *[value for value in companions if value != name][:2], *(preference_tags or [])[:4], "레시피 재료 분량 조리법"])
-                    report.searches += 1
-                    hits = await self.discovery.search(query[:1000], 5, fetch_raw_content=True)
+                    # 재고 전체를 검색 필수 조건처럼 묶지 않는다. 취향 검색은 핵심 임박 재료에 집중한다.
+                    companion_terms = [] if preference_tags else [value for value in companions if value != name][:2]
+                    query = " ".join([name, *companion_terms, *search_preference_terms(preference_tags or [])[:4], "레시피 재료 분량 조리법"])
+                    searched = False
+                    async def search_hits(search_query: str = query[:1000]) -> list[DiscoveryHit]:
+                        nonlocal searched
+                        searched = True
+                        report.searches += 1
+                        return await self.discovery.search(search_query, 5, fetch_raw_content=True)
+                    hits = await self._search_cache.get_or_load(query[:1000], search_hits)
+                    if not searched:
+                        report.search_cache_hits += 1
+                    if not any(hit.rawContent for hit in hits):
+                        self._search_cache.forget(query[:1000])
                     report.discovered += len(hits)
                     for hit in hits:
-                        recipe = parse_web_recipe(hit)
+                        clean = source_text(hit.rawContent or "")
+                        key = hashlib.sha256(json.dumps([hit.url, hit.title, clean, self.settings.ollama_model, PROMPT_VERSION], ensure_ascii=False).encode()).hexdigest()
+                        cached = self._parsed_cache.get(key)
+                        if cached and monotonic() - cached[0] < self.settings.recipe_cache_ttl_seconds:
+                            recipe = cached[1].model_copy(deep=True)
+                            recipe.sourceRevision = hashlib.sha256((hit.rawContent or "").encode()).hexdigest()
+                            self._parsed_cache.move_to_end(key)
+                            report.extraction_cache_hits += 1
+                        else:
+                            self._parsed_cache.pop(key, None)
+                            recipe = parse_web_recipe(hit)
                         failure = None
                         if not recipe:
                             text = source_text(hit.rawContent or "")
@@ -203,7 +238,15 @@ class WebRecipeProvider:
                                     finally:
                                         report.extraction_ms += (monotonic() - extraction_started) * 1000
                         if recipe:
+                            self._parsed_cache[key] = (monotonic(), recipe.model_copy(deep=True))
+                            self._parsed_cache.move_to_end(key)
+                            while len(self._parsed_cache) > 64:
+                                self._parsed_cache.popitem(last=False)
                             results[(recipe.source, recipe.sourceRecipeId)] = (recipe, {"url": hit.url, "raw_content": hit.rawContent})
+                            # 이미 이 재료를 쓰는 취향 후보를 확보했으면 다른 페이지 추출은 생략한다.
+                            relevant = any(canonical(item.name) == canonical(name) for item in recipe.ingredients)
+                            if relevant and (not preference_tags or explicit_preference_signal(recipe.model_dump(), preference_tags)):
+                                break
                         elif failure:
                             report.failure_reasons[failure] = report.failure_reasons.get(failure, 0) + 1
                             logger.info("recipe_web_parse_rejected reason=%s", failure)

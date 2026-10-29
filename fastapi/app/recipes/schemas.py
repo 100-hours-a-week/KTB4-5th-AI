@@ -206,7 +206,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v12"
+    policyVersion: str = "recipe-rerank-v13"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
@@ -216,6 +216,8 @@ class RecommendationTrace(Contract):
     webSearchCount: int = 0
     webDiscoveredCount: int = 0
     webExtractionCalls: int = 0
+    webSearchCacheHits: int = 0
+    webExtractionCacheHits: int = 0
     webParseFailureCounts: dict[str, int] = Field(default_factory=dict)
     aiCandidateCount: int = 0
     aiInputBytes: int = 0

@@ -38,6 +38,39 @@ def source_servings(text: str) -> float | None:
     return next(iter(values)) if len(values) == 1 and next(iter(values)) > 0 and not mixed_batch(text) else None
 
 
+# 표기상 이름/분량 경계가 있는 미지원 범위·단위는 수치화하지 않고 원문 그대로 보존한다.
+def unmeasured_source_ingredient(text: str, number: int) -> Ingredient | None:
+    found = re.match(r"^([가-힣A-Za-z][가-힣A-Za-z ()/\-]*?)\s+(?=[0-9½⅓⅔¼¾⅛⅜⅝⅞])", text)
+    if not found or len(text) > 500:
+        return None
+    name = found[1].strip()
+    if len(name) > 100 or re.search(r"넣|썰|볶|끓|찝|찌|삶|하세요|합니다", name):
+        return None
+    return Ingredient(ingredientNo=number, name=name, amountText=text)
+
+
+# 번호 단계의 한 문단씩 보존한다. 번호 밖의 추가 조리문이 있으면 누락 위험으로 규칙 추출을 중단한다.
+def numbered_instructions(lines: list[str]) -> list[str] | None:
+    starts = [(index, re.match(r"^\s*(?:>\s*)?(\d+)[.)]\s+(.+)$", line)) for index, line in enumerate(lines)]
+    starts = [(index, match) for index, match in starts if match]
+    if not starts:
+        return None
+    if [int(match[1]) for _, match in starts] != list(range(1, len(starts) + 1)):
+        return []
+    result = []
+    for n, (index, match) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        paragraph = [match[2].strip()]
+        rest = lines[index + 1:end]
+        boundary = next((i for i, line in enumerate(rest) if not line.strip()), len(rest))
+        paragraph.extend(line.strip() for line in rest[:boundary])
+        tail = "\n".join(rest[boundary:])
+        if re.search(r"넣어|볶아|끓여|썰어|찐다|찝니다|찌고|찌세요|삶아|익혀|뒤집|식혀|버무려", tail):
+            return []
+        result.append("\n".join(paragraph))
+    return result
+
+
 # 원문의 한 재료를 읽고 미지원 표기는 UNKNOWN으로 보존한다. 알려진 분량을 모델이 바꾸지 못하게 한다.
 def quoted_ingredient(name: str, quote: str, number: int) -> Ingredient | None:
     parsed = parse_piece(quote)

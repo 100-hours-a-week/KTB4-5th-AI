@@ -69,6 +69,8 @@ MATCHED에는 preferenceEvidence로 원문 인용을 함께 제공한다. 인용
 
 웹 보충의 trace.webDiscoveredCount는 받은 검색 결과 수, webExtractionCalls는 규칙 실패 후 Gemma EXTRACT 시도 수, webParseFailureCounts는 최종 추출 실패 사유별 건수다. timingsMs.webExtractionMs는 해당 모델 호출 대기 포함 시간이다. aiCalls는 RANK와 EXTRACT 시도의 합계이며 recommendationEngine=AI는 최종 RANK 성공을 뜻한다. 추출만 AI를 사용하고 최종 정렬이 폴백인 경우 RULE_FALLBACK일 수 있다. 기존 요청 필드와 레시피 콜백 경로는 유지한다.
 
+v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모리의 검색/검증된 본문 재사용 횟수다. 캐시 재사용 시 webSearchCount 또는 webExtractionCalls가 0이어도 웹 추천이 포함될 수 있다. 취향이 있어도 더 오래된 임박 재료와 조리 적합성 그룹은 보호하며, 같은 조건에서는 검증된 취향 일치를 추가 구매 재료 수보다 먼저 비교한다.
+
 레시피 하나에 당근 3개가 필요한 경우의 inventoryUsage 부분 예시:
 
 ```json
