@@ -111,3 +111,16 @@ v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모
 접수 후 작업 오류는 GET/콜백 status=FAILED로 알린다. RECIPE_TIMEOUT, RECIPE_INTERNAL_ERROR, RECIPE_WORKER_STOPPED 또는 외부 의존성 오류 코드다. 정상 DB 조회에서 후보가 없는 것은 실패가 아니라 COMPLETED + recommendationEngine=EMPTY다.
 
 DB 사용 환경은 022_recipe_recommendation_results.sql 적용이 필요하다. terminal 결과만 보관하며 대기 작업은 메모리에 있다. 단일 FastAPI 프로세스/replica가 전제다. 정상 종료는 남은 작업을 실패로 저장/전달하려고 제한된 시간 동안 시도한다. 강제 종료 시 미완료 작업은 소실될 수 있으므로 큐 영속/재시작 자동 복구로 해석하지 않는다. 운영 보장은 [추천 설계](recipe_ai_recommendations.md)의 운영 절을 따른다.
+
+## 태그별 취향 판정
+
+각 recommendations/confirmationCandidates 항목에 preferenceAssessments를 추가한다. 요청 태그 순서를 유지하며 취향이 없으면 []다. GET result와 레시피 콜백 result에서 같은 스키마를 사용한다.
+
+```json
+"preferenceAssessments": [
+  {"tag": "매운거", "status": "MATCHED", "evidence": "고춧가루"},
+  {"tag": "칼칼한거", "status": "NOT_MATCHED", "evidence": null}
+]
+```
+
+MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch=MATCHED는 태그 하나 이상 충족을 뜻한다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 같은 임박 활용 그룹에서는 취향 일치와 충족 태그 수를 부족 재료보다 먼저 비교한다.

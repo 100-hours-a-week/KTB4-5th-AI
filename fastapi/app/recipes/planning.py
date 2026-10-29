@@ -20,10 +20,10 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v13"
+POLICY_VERSION = "recipe-rerank-v14"
 
 
-# 같은 임박 활용·적합성 그룹에서 구매 부담이 최소 후보보다 2종 이내인 새 임박 주재료를 먼저 확보한다.
+# 임박 활용 그룹을 보호하고 취향 일치 여부를 먼저 비교한 뒤 재료 분산과 구매 부담을 고려한다.
 def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dict]:
     if "USE_EXPIRING" not in request.strategies:
         return rows
@@ -35,9 +35,10 @@ def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dic
         name = canonical(item.name)
         dates[name] = min(dates.get(name, item.expirationDate), item.expirationDate)
     pending, selected, covered = list(rows), [], set()
+    group_size = 4 if request.preferenceTags else 2
     while pending and len(selected) < request.limit:
-        best = min(eligibility_tier(row)[:2] for row in pending)
-        group = [row for row in pending if eligibility_tier(row)[:2] == best]
+        best = min(eligibility_tier(row)[:group_size] for row in pending)
+        group = [row for row in pending if eligibility_tier(row)[:group_size] == best]
         minimum_missing = min(len(row["missingIngredients"]) for row in group)
         fresh = [(row, {canonical(name) for name in row["usesExpiringMainIngredients"]} - covered) for row in group
                  if row.get("preferenceMatch") == "MATCHED" or len(row["missingIngredients"]) <= minimum_missing + 2]
@@ -95,6 +96,8 @@ class MealRanker:
         self.warnings: list[str] = []
         self.preference_matches: set[tuple[str, str]] = set()
         self.preference_evidence: dict[tuple[str, str], str] = {}
+        self.preference_tag_evidence: dict[tuple[str, str], dict[str, str]] = {}
+        self.rejected_preference_tags: dict[tuple[str, str], set[str]] = {}
         self.rejected_preference_identities: set[tuple[str, str]] = set()
         self.evaluated_identities: set[tuple[str, str]] = set()
         self.max_input_bytes = max_input_bytes
@@ -106,6 +109,8 @@ class MealRanker:
     async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
         self.preference_matches = set()
         self.preference_evidence = {}
+        self.preference_tag_evidence = {}
+        self.rejected_preference_tags = {}
         self.rejected_preference_identities = set()
         self.evaluated_identities = set()
         self.unavailable = False
@@ -132,16 +137,28 @@ class MealRanker:
             matched_ids = result.preferenceMatchedCandidateIds
             if len(matched_ids) != len(set(matched_ids)) or not set(matched_ids) <= wanted:
                 raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
-            evidence = {item.candidateId: item.quote for item in result.preferenceEvidence}
-            if len(evidence) != len(result.preferenceEvidence) or not set(evidence) <= set(matched_ids):
+            if not {item.candidateId for item in result.preferenceEvidence} <= set(matched_ids):
                 raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
             for identifier in matched_ids:
                 row = window[identifier - 1]
-                quote = evidence.get(identifier, "")
-                if context.get("preferenceTags") and valid_preference_evidence(row, quote, context["preferenceTags"]):
-                    identity = (row["source"], row["sourceRecipeId"])
+                identity = (row["source"], row["sourceRecipeId"])
+                tags = context.get("preferenceTags", [])
+                verified = {}
+                for item in result.preferenceEvidence:
+                    if item.candidateId != identifier:
+                        continue
+                    if any(tag not in tags for tag in item.tags):
+                        raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
+                    for tag in item.tags:
+                        if valid_preference_evidence(row, item.quote, [tag]):
+                            verified.setdefault(tag, item.quote)
+                        else:
+                            self.rejected_preference_tags.setdefault(identity, set()).add(tag)
+                            self.warnings.append("AI_PREFERENCE_EVIDENCE_REJECTED")
+                if verified:
                     self.preference_matches.add(identity)
-                    self.preference_evidence[identity] = quote
+                    self.preference_tag_evidence[identity] = verified
+                    self.preference_evidence[identity] = next(iter(verified.values()))
                 else:
                     self.rejected_preference_identities.add((row["source"], row["sourceRecipeId"]))
                     self.warnings.append("AI_PREFERENCE_EVIDENCE_REJECTED")
@@ -151,6 +168,8 @@ class MealRanker:
                 ordered = sorted(ordered, key=lambda row: (row["source"], row["sourceRecipeId"]) not in self.preference_matches)
                 for row in ordered:
                     row["preferenceMatch"] = "MATCHED" if (row["source"], row["sourceRecipeId"]) in self.preference_matches else "UNKNOWN"
+                    row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED", "evidence": quote}
+                                                    for tag, quote in self.preference_tag_evidence.get((row["source"], row["sourceRecipeId"]), {}).items()]
             # AI가 실제 임박 활용·소비기한·적합성의 검증된 우선순위를 뒤집을 수 없다.
             constrained = sorted(ordered, key=eligibility_tier)
             if constrained != ordered:
@@ -158,6 +177,12 @@ class MealRanker:
             self.model = model
             return constrained
         except AI_ERRORS as exc:
+            self.preference_matches.clear()
+            self.preference_evidence.clear()
+            self.preference_tag_evidence.clear()
+            self.rejected_preference_tags.clear()
+            self.rejected_preference_identities.clear()
+            self.evaluated_identities.clear()
             self.unavailable = isinstance(exc, (AppError, httpx.HTTPError, TimeoutError))
             allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION", "INVALID_RECIPE_PREFERENCE_IDS"}
             code = str(exc) if type(exc) is ValueError and str(exc) in allowed else "TIME_BUDGET_EXCEEDED" if isinstance(exc, TimeoutError) else "REMOTE_OR_SCHEMA_ERROR"
@@ -169,11 +194,13 @@ class MealRanker:
                 self.duration_ms += (monotonic() - call_started) * 1000
 
 
-# 임박 활용을 요청한 경우 날짜 우선순위 뒤에 적합성 그룹을 붙여 보호할 정렬 키를 반환한다.
+# 임박 활용 다음에 검증된 취향 일치를 비교하고, 부족 재료에 따른 적합성과 구매 부담은 뒤에 둔다.
 def eligibility_tier(row: dict) -> tuple[int, ...]:
-    prefix = (*row.get("_expiryPriority", ()), row["_suitability"]["tier"])
     preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else (0 if row["preferenceMatch"] == "MATCHED" else 1,)
-    return (*prefix, *preference, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else (*prefix, *preference)
+    if preference:
+        preference += (-sum(item["status"] == "MATCHED" for item in row.get("preferenceAssessments", [])),)
+    prefix = (*row.get("_expiryPriority", ()), *preference, row["_suitability"]["tier"])
+    return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
 
 
 # 부족한 주재료도 구매 필요 후보로 포함한다. 정확히 보유한 식재료가 없는 계열 후보만 따로 둔다.
@@ -293,7 +320,7 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
         if context.get("preferenceTags"):
             for candidate, row in zip(payload["candidates"], window, strict=True):
                 candidate["preferenceEvidenceOptions"] = list(dict.fromkeys(item["name"] for item in row["ingredients"]
-                    if len(item["name"]) <= 80 and valid_preference_evidence(row, item["name"], context["preferenceTags"])))
+                    if len(item["name"]) <= 80 and any(valid_preference_evidence(row, item["name"], [tag]) for tag in context["preferenceTags"])))
         # 실제 HTTP JSON과 같은 공백 없는 직렬화로 검사하고 실행 예산 숫자 변경 여유도 남긴다.
         if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= max_bytes - 64:
             return payload, window

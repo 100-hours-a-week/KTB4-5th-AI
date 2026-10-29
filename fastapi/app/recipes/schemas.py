@@ -181,6 +181,12 @@ class InventoryAllocation(Contract):
     usedAmount: float = Field(ge=0)
 
 
+class PreferenceAssessment(Contract):
+    tag: str
+    status: Literal["MATCHED", "NOT_MATCHED", "UNKNOWN"]
+    evidence: str | None = None
+
+
 class RecommendedRecipe(RecipeSnapshot):
     score: float = Field(ge=0, le=1)
     scoreBreakdown: ScoreBreakdown
@@ -202,11 +208,12 @@ class RecommendedRecipe(RecipeSnapshot):
     usesExpiringMainIngredients: list[str] = Field(default_factory=list)
     preferenceMatch: Literal["MATCHED", "NOT_MATCHED", "UNKNOWN", "NOT_REQUESTED"] = "NOT_REQUESTED"
     preferenceEvidence: str | None = None
+    preferenceAssessments: list[PreferenceAssessment] = Field(default_factory=list)
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v13"
+    policyVersion: str = "recipe-rerank-v14"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0

@@ -243,13 +243,18 @@ class RecipeService:
                 elif not self.settings.recipe_tavily_api_key:
                     ranker.warnings.append("PREFERENCE_WEB_SEARCH_NOT_CONFIGURED")
             evaluated = ranker.evaluated_identities
-            for row in baseline:
+            for row in [*baseline, *confirmations]:
                 identity = (row["source"], row["sourceRecipeId"])
                 row["preferenceMatch"] = ("NOT_REQUESTED" if not request.preferenceTags else "MATCHED" if identity in ranker.preference_matches
                                           else "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities else "UNKNOWN")
+                tag_evidence = ranker.preference_tag_evidence.get(identity, {})
+                row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED" if tag in tag_evidence else
+                                                  "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities
+                                                  and tag not in ranker.rejected_preference_tags.get(identity, set()) else "UNKNOWN",
+                                                  "evidence": tag_evidence.get(tag)} for tag in request.preferenceTags]
                 if row["preferenceMatch"] == "MATCHED":
                     row["preferenceEvidence"] = ranker.preference_evidence[identity]
-                    row["reason"] += f" AI가 요청 취향({', '.join(request.preferenceTags)})의 원문 근거로 '{row['preferenceEvidence']}'를 제시했습니다."
+                    row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
             if request.preferenceTags and len(baseline) > len(evaluated):
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
             if request.preferenceTags and not ranker.preference_matches:
