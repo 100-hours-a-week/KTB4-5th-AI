@@ -13,6 +13,7 @@ from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
 from app.recipes.context import variation_key
+from app.recipes.meal_quality import frying_steps, shopping_band, taste_context, weak_spicy_basis
 from app.recipes.preferences import valid_preference_evidence
 from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, transient_failure
 from app.recipes.retrieval import canonical, missing_named_ingredients
@@ -21,7 +22,7 @@ from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v15"
+POLICY_VERSION = "recipe-rerank-v16"
 
 
 # 임박 활용 그룹을 보호하고 취향 일치 여부를 먼저 비교한 뒤 재료 분산과 구매 부담을 고려한다.
@@ -36,7 +37,7 @@ def cover_expiring(rows: list[dict], request: RecommendationRequest) -> list[dic
         name = canonical(item.name)
         dates[name] = min(dates.get(name, item.expirationDate), item.expirationDate)
     pending, selected, covered = list(rows), [], set()
-    group_size = 4 if request.preferenceTags else 2
+    group_size = 6 if request.preferenceTags else 4
     while pending and len(selected) < request.limit:
         best = min(eligibility_tier(row)[:group_size] for row in pending)
         group = [row for row in pending if eligibility_tier(row)[:group_size] == best]
@@ -285,7 +286,8 @@ def eligibility_tier(row: dict) -> tuple[int, ...]:
     preference = () if row.get("preferenceMatch") in {None, "NOT_REQUESTED"} else (0 if row["preferenceMatch"] == "MATCHED" else 1,)
     if preference:
         preference += (-sum(item["status"] == "MATCHED" for item in row.get("preferenceAssessments", [])),)
-    prefix = (*row.get("_expiryPriority", ()), *preference, row["_suitability"]["tier"])
+    quantity = 0 if row.get("quantityStatus") == "SUFFICIENT" else 1 if row.get("baseServings") is not None else 2
+    prefix = (*row.get("_expiryPriority", ()), *preference, shopping_band(row), quantity, row["_suitability"]["tier"])
     return (*prefix, len(row["missingIngredients"]), *row.get("_expiryDetail", ())) if "_expiryPriority" in row else prefix
 
 
@@ -328,6 +330,12 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             row["feasibility"] = "NEEDS_CHECK"
         if row.get("baseServings") is None:
             row["confirmationReasons"].append("원문 인분이 없어 요청 인분의 필요량을 확정할 수 없습니다.")
+        if len(row["missingIngredients"]) > 10:
+            row["confirmationReasons"].append("추가 식재료가 10종을 초과해 구매 부담이 큰 후보입니다.")
+        if weak_spicy_basis(row):
+            row["confirmationReasons"].append("고추장만 소량 표기돼 있어 매운 강도를 확정하기 어렵습니다.")
+        if frying_steps(row):
+            row["confirmationReasons"].append("원문에 튀김 과정이 있어 담백한 취향 적합성은 보수적으로 확인합니다.")
         urgent_text = f"3일 이내 소비기한 재료 {', '.join(urgent)}가 원문에 포함됩니다." if urgent else "이 레시피에 사용되는 임박 재료는 없습니다."
         missing_title = missing_named_ingredients(row["name"], [i["name"] for i in row["ingredients"]], row["missingIngredients"])
         warning = f" 제목에 명시된 미보유 재료: {', '.join(missing_title)}." if missing_title else ""
@@ -339,6 +347,8 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
             warning += f" 추가로 준비할 식재료: {', '.join(row['missingIngredients'])}."
         row["reason"] = (f"보유 재료 {len(row['usesInventory'])}종 사용, 추가로 확인할 재료 {len(row['missingIngredients'])}종입니다. "
                          f"{urgent_text} 원문 조리 {len(row['steps'])}단계이며 분량 상태는 {row['quantityStatus']}입니다.{warning}")
+        if len(row["missingIngredients"]) > 10:
+            row["reason"] += " 추가 식재료가 10종을 초과해 같은 취향 조건의 구매 부담이 적은 후보 뒤에서 비교합니다."
         rows.append(row)
     rows.sort(key=lambda row: (*eligibility_tier(row), len(row["steps"]) if request.strategies == ["SIMPLE_COOKING"] else 0,
                               len(row["missingIngredients"]), *row.get("_expiryDetail", ()), -row["score"], row["source"], row["sourceRecipeId"]))
@@ -405,6 +415,7 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
         payload = {**base, "candidates": compact_candidates(window, brief=True), "executionBudgetSeconds": 60.0}
         if context.get("preferenceTags"):
             for candidate, row in zip(payload["candidates"], window, strict=True):
+                candidate["tasteContext"] = taste_context(row)
                 candidate["preferenceEvidenceOptions"] = list(dict.fromkeys(item["name"] for item in row["ingredients"]
                     if len(item["name"]) <= 80 and any(valid_preference_evidence(row, item["name"], [tag]) for tag in context["preferenceTags"])))
         # 실제 HTTP JSON과 같은 공백 없는 직렬화로 검사하고 실행 예산 숫자 변경 여유도 남긴다.

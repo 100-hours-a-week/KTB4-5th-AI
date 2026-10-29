@@ -130,3 +130,331 @@ MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 �
 trace.preferenceDecisionCacheHits는 해당 추천 실행에서 재사용한 레시피별 취향 판정 수다. 전부 재사용하면 recommendationEngine=AI여도 aiCalls=0일 수 있다. PREFERENCE_DECISION_CACHE_USED 경고로 구분한다. 결과 전체 캐시가 적중한 응답의 trace는 원본 생성 시점의 값이다.
 
 AI_CIRCUIT_OPEN은 연결/과부하 일시 장애가 연속되어 원격 RANK 호출을 쉬는 상태이며 미평가 취향은 UNKNOWN이다. AI_TRANSIENT_RETRY는 같은 전체 시간 예산 안에서 실제 1회 재시도를 수행한 경우다. 입력/스키마/유효하지 않은 모델 출력 한 건으로 후속 사용자 요청을 막지 않는다. 캐시는 프로세스 내 최대 512개/10분이며 서버 재시작/다른 replica 간 지속성을 보증하지 않는다. SQL 변경은 없다.
+
+### 생략 가능한 필드와 기본값
+
+생략 시 기본값이 적용되는 것은 선택 필드입니다. requestId/refrigeratorId/inventoryFingerprint/inventory는 필수이며 생략하면 HTTP400 INVALID_REQUEST입니다. null과 생략은 다릅니다. 아래 배열/문자열/정수 필드에 null을 보내면 기본값을 쓰는 것이 아니라 검증 오류입니다. ingredientKey/quantity/weightValue처럼 스키마에서 null을 허용한 필드는 각 단위 계약을 따릅니다.
+
+| 선택 필드 | 생략 시 값 | 의미 |
+| --- | --- | --- |
+| recommendationMode | EXCLUDE_EXPIRED | 이미 소비기한이 지난 재고를 후보 계산에서 제외 |
+| excludedIngredientNames | [] | 별도 제외 재료 없음. 알레르기가 없다는 뜻은 아님 |
+| limit | 10 | 최대 추천 수. 적합 후보가 적으면 그 미만 |
+| preferenceTags | [] | 무취향 요청 |
+| targetServings | 2 | 요청 인분. 원문 인분/분량이 있어야 소모량 계산 가능 |
+| strategies | [USE_EXPIRING, MINIMIZE_SHOPPING, SIMPLE_COOKING] | 아래 전략 3종을 고려 |
+| pantryIngredientNames | [] | 추가 보유 확인 양념 목록을 전달하지 않음 |
+| recentRecipeIds | [] | 최근 추천 이력에 따른 재노출 조정 없음 |
+
+### 전략 3종과 적용 범위
+
+| strategies 값 | 뜻 | 적용 범위 |
+| --- | --- | --- |
+| USE_EXPIRING | 임박 재료 활용 | 오늘~3일 이내 소비기한의 재고 활용을 우선. 요청에서 빠져 있어도 서버가 추가 |
+| MINIMIZE_SHOPPING | 추가 구매 부담 고려 | 같은 임박/취향 우선순위에서 부족한 식재료와 구매 부담을 고려 |
+| SIMPLE_COOKING | 조리 수고 고려 | 원문 단계 수와 제공된 조리 정보를 모델이 참고. 단계 수를 조리시간으로 환산하지 않음 |
+
+strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 활용 그룹, 취향 일치/충족 태그 수를 먼저 보호하고 나머지 조건을 비교합니다. 각 반환 레시피의 strategy는 해당 후보의 대표 전략입니다. 요청에서 중복 전략이나 빈 배열은 허용하지 않습니다.
+
+### 양념과 최근 추천 이력
+
+- pantryIngredientNames는 소금/간장 등 냉장고 재고와 별도로 보유를 확인한 양념 이름입니다. 선택 필드이며 검토된 기본 양념은 이 목록이 비어 있어도 구매 필요 목록에서 제외합니다. PANTRY_UNVERIFIED는 실제 보유량/분량을 보증하지 않습니다. 양파/두부 등 신선 식재료를 이 목록에 넣어 보유 재고로 처리할 수 없습니다. 제외 재료 조건은 양념에도 우선 적용합니다.
+- recentRecipeIds는 최근 사용자에게 노출한 추천 레시피 식별자 목록입니다. 사용자가 선택/적용한 요리만을 의미하지 않습니다. 백엔드가 최근 추천 목록을 보관해 다음 요청에 전달합니다. 이력 보관 기간/횟수는 백엔드 정책이며 AI가 자동 수집하지 않습니다.
+- 형식은 SOURCE:sourceRecipeId입니다. 예를 들어 응답 source=FOOD_SAFETY_KOREA, sourceRecipeId=123이면 FOOD_SAFETY_KOREA:123을 보냅니다. 백엔드 MySQL recipe_id나 AI recommendationId/jobId를 넣는 필드가 아닙니다. 현재 코드는 이 문자열 형식을 별도 정규식으로 검사하지 않고 후보 식별자와 정확히 비교합니다.
+- 최근 추천 이력은 동일한 우선순위 후보의 재노출을 뒤로 미루는 힌트이며 강제 제외 목록이 아닙니다. 선호 학습/선택 이력 저장 API를 대신하지 않습니다.
+
+
+### 일반 추천, 확인 후보와 미활용 임박 재료
+
+| 실제 JSON 필드 | 의미 | 개수/주의사항 |
+| --- | --- | --- |
+| result.recommendations | 일반 추천 레시피 | 최대 limit, 상한 10개. 부족 재료가 있어도 포함 가능 |
+| result.confirmationCandidates | 보유 식재료와 정확 매칭은 없지만 관련 계열의 주재료 재고가 있어 종류/부위/가공 상태 확인이 필요한 별도 후보 | 최대 3개. 10위 밖의 차순위 후보를 담는 배열이 아님 |
+| result.uncoveredExpiringIngredients | 최종 recommendations에서 주재료로 활용되지 않은 임박 식재료 이름 | 문자열 배열. 재고 ID 배열이 아님 |
+
+예를 들어 보유 재고의 소고기와 원문이 요구하는 쇠고기안심을 같은 재료/분량이라고 확정하지 않습니다. 정확 식품 매칭이 전혀 없고 이런 관련 계열 주재료만 있으면 confirmationCandidates로 분리하고 확인 사유를 제공합니다. 정확히 보유한 다른 식품이 있는 후보는 부족 주재료가 있어도 recommendations에 들어갈 수 있습니다. 단순 양념/물 보유만으로 정확 식품 매칭으로 보지 않습니다.
+
+확인 후보의 feasibility는 NEEDS_CHECK이며 자동 대체/사용량 차감 대상으로 삼지 않습니다. 확인 후보만 있고 일반 추천이 없으면 recommendationEngine=EMPTY일 수 있습니다. 후보 자체가 없으면 두 배열 모두 []입니다.
+
+문서의 한글은 설명/화면 표시 문구입니다. 실제 JSON 키는 아래 예시와 필드 표의 영문 camelCase를 그대로 사용합니다. 최종 미활용 임박 재료 등의 한글 설명을 JSON 키로 보내지 않습니다. name/reason/confirmationReasons 등 문자열 값에는 한글이 들어갈 수 있습니다.
+
+### 결과 조회 JSON 예시
+
+전체 형태가 확인되도록 완료 예시를 제공합니다. 아래는 실제 Dev 무취향 시험 응답에서 recommendations의 1개와 빈 확인 후보 배열만 발췌한 형식 예시입니다. trace/원천/필드 값은 해당 시험의 값이며 새로운 호출의 고정 결과가 아닙니다.
+
+<details>
+<summary>COMPLETED 응답 JSON 펼치기</summary>
+
+```json
+{
+  "jobId": "rjob_d583a166728b4da8879842d17d2ac58f",
+  "requestId": "v15-deployed-ad3f6dfd2d9c45019cc5e96f313b372a",
+  "status": "COMPLETED",
+  "submittedAt": "2026-10-29T05:14:11.313913Z",
+  "refrigeratorId": 928401,
+  "startedAt": "2026-10-29T05:14:11.315450Z",
+  "completedAt": "2026-10-29T05:14:15.443814Z",
+  "result": {
+    "recommendationId": "rec_52b5019669684aab8f04a2197192bdff",
+    "refrigeratorId": 928401,
+    "inventoryFingerprint": "0533f5477dac0fba20408a9c0607e69dd69d623b952ed8ae8b86df41a580603c",
+    "recommendationMode": "EXCLUDE_EXPIRED",
+    "recommendations": [
+      {
+        "source": "FOOD_SAFETY_KOREA",
+        "sourceRecipeId": "32",
+        "sourceRevision": "924849b011b660a8defd8847e68e57632361eceee2663b4f7d92f69b9d09d540",
+        "name": "순두부 사과 소스 오이무침",
+        "imageUrl": "http://www.foodsafetykorea.go.kr/uploadimg/cook/10_00032_2.png",
+        "sourceUrl": null,
+        "baseServings": null,
+        "ingredients": [
+          {
+            "ingredientNo": 1,
+            "name": "오이",
+            "amountText": "오이 70g(1/3개)",
+            "measureType": "WEIGHT",
+            "amountValue": 70.0,
+            "unit": "G"
+          },
+          {
+            "ingredientNo": 2,
+            "name": "다진 땅콩",
+            "amountText": "다진 땅콩 10g(1큰술)",
+            "measureType": "WEIGHT",
+            "amountValue": 10.0,
+            "unit": "G"
+          },
+          {
+            "ingredientNo": 3,
+            "name": "순두부",
+            "amountText": "순두부 40g(1/8봉지)",
+            "measureType": "WEIGHT",
+            "amountValue": 40.0,
+            "unit": "G"
+          },
+          {
+            "ingredientNo": 4,
+            "name": "사과",
+            "amountText": "사과 50g(1/3개)",
+            "measureType": "WEIGHT",
+            "amountValue": 50.0,
+            "unit": "G"
+          }
+        ],
+        "steps": [
+          {
+            "stepNo": 1,
+            "instruction": "1. 사과, 순두부를 믹서에 넣고 곱게 갈아 소스를 만든다.",
+            "imageUrl": "http://www.foodsafetykorea.go.kr/uploadimg/cook/20_00032_1.png"
+          },
+          {
+            "stepNo": 2,
+            "instruction": "2. 오이는 소금으로 문질러 씻어 반을 갈라 씨를 제거하고 어슷썰기를 한다.",
+            "imageUrl": "http://www.foodsafetykorea.go.kr/uploadimg/cook/20_00032_2.png"
+          },
+          {
+            "stepNo": 3,
+            "instruction": "3. 썰어 놓은 오이에 순두부사과 소스를 넣고 버무린 후 다진 땅콩을 뿌려 마무리 한다.",
+            "imageUrl": "http://www.foodsafetykorea.go.kr/uploadimg/cook/20_00032_3.png"
+          }
+        ],
+        "score": 0.2,
+        "scoreBreakdown": {
+          "expiringIngredient": 0.4,
+          "inventoryCoverage": 0.15,
+          "missingIngredientPenalty": 0.35,
+          "variety": 1.0
+        },
+        "usesInventory": [
+          "순두부"
+        ],
+        "usesExpiringIngredients": [
+          "순두부"
+        ],
+        "missingIngredients": [
+          "다진 땅콩",
+          "사과",
+          "오이"
+        ],
+        "excludedIngredientCheck": "PASSED",
+        "reason": "보유 재료 1종 사용, 추가로 확인할 재료 3종입니다. 3일 이내 소비기한 재료 순두부가 원문에 포함됩니다. 원문 조리 3단계이며 분량 상태는 NEEDS_CHECK입니다. 제목에 명시된 미보유 재료: 오이, 사과. 추가로 준비할 식재료: 다진 땅콩, 사과, 오이. 임박 재료 분산 활용: 순두부를 앞선 추천과 추가로 활용하도록 선정했습니다.",
+        "strategy": "USE_EXPIRING",
+        "targetServings": 2,
+        "quantityStatus": "NEEDS_CHECK",
+        "quantityScope": "FOOD_INGREDIENTS",
+        "ingredientRequirements": [
+          {
+            "ingredientNo": 1,
+            "name": "오이",
+            "amountText": "오이 70g(1/3개)",
+            "requiredAmount": null,
+            "unit": "G",
+            "allocatedAmount": null,
+            "shortageAmount": null,
+            "status": "UNKNOWN_AMOUNT"
+          },
+          {
+            "ingredientNo": 2,
+            "name": "다진 땅콩",
+            "amountText": "다진 땅콩 10g(1큰술)",
+            "requiredAmount": null,
+            "unit": "G",
+            "allocatedAmount": null,
+            "shortageAmount": null,
+            "status": "UNKNOWN_AMOUNT"
+          },
+          {
+            "ingredientNo": 3,
+            "name": "순두부",
+            "amountText": "순두부 40g(1/8봉지)",
+            "requiredAmount": null,
+            "unit": "G",
+            "allocatedAmount": null,
+            "shortageAmount": null,
+            "status": "UNKNOWN_AMOUNT"
+          },
+          {
+            "ingredientNo": 4,
+            "name": "사과",
+            "amountText": "사과 50g(1/3개)",
+            "requiredAmount": null,
+            "unit": "G",
+            "allocatedAmount": null,
+            "shortageAmount": null,
+            "status": "UNKNOWN_AMOUNT"
+          }
+        ],
+        "inventoryUsage": [
+          {
+            "ingredientId": 1,
+            "name": "순두부",
+            "unit": "G",
+            "availableAmount": 400.0,
+            "usedAmount": 0.0,
+            "remainingAmount": 400.0,
+            "allocationStatus": "UNRESOLVED",
+            "allocations": []
+          },
+          {
+            "ingredientId": 2,
+            "name": "애호박",
+            "unit": "G",
+            "availableAmount": 200.0,
+            "usedAmount": 0.0,
+            "remainingAmount": 200.0,
+            "allocationStatus": "UNUSED",
+            "allocations": []
+          },
+          {
+            "ingredientId": 3,
+            "name": "대파",
+            "unit": "G",
+            "availableAmount": 100.0,
+            "usedAmount": 0.0,
+            "remainingAmount": 100.0,
+            "allocationStatus": "UNUSED",
+            "allocations": []
+          },
+          {
+            "ingredientId": 4,
+            "name": "계란",
+            "unit": "G",
+            "availableAmount": 200.0,
+            "usedAmount": 0.0,
+            "remainingAmount": 200.0,
+            "allocationStatus": "UNUSED",
+            "allocations": []
+          },
+          {
+            "ingredientId": 5,
+            "name": "팽이버섯",
+            "unit": "G",
+            "availableAmount": 150.0,
+            "usedAmount": 0.0,
+            "remainingAmount": 150.0,
+            "allocationStatus": "UNUSED",
+            "allocations": []
+          }
+        ],
+        "essentialIngredientNos": [
+          1,
+          3,
+          4
+        ],
+        "missingEssentialIngredientNos": [
+          1,
+          4
+        ],
+        "feasibility": "NEEDS_SHOPPING",
+        "confirmationReasons": [
+          "원문 인분이 없어 요청 인분의 필요량을 확정할 수 없습니다."
+        ],
+        "usesExpiringMainIngredients": [
+          "순두부"
+        ],
+        "preferenceMatch": "NOT_REQUESTED",
+        "preferenceEvidence": null,
+        "preferenceAssessments": [],
+        "preparationNote": "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
+      }
+    ],
+    "confirmationCandidates": [],
+    "uncoveredExpiringIngredients": [],
+    "generatedAt": "2026-10-29T05:14:15.435642Z",
+    "recommendationEngine": "AI",
+    "mealPlan": {
+      "focusIngredientIds": [],
+      "ideas": []
+    },
+    "warnings": [
+      "CONFIRMATION_CANDIDATES_SEPARATED",
+      "MISSING_INGREDIENTS_REQUIRE_SHOPPING",
+      "UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK",
+      "AI_INPUT_WINDOW_REDUCED",
+      "SOURCE_SERVINGS_UNAVAILABLE",
+      "SOURCE_QUANTITIES_UNRESOLVED",
+      "PARTIAL_STRATEGY_COVERAGE"
+    ],
+    "trace": {
+      "policyVersion": "recipe-rerank-v15",
+      "model": "gemma4:e2b",
+      "promptVersion": "recipe-grounded-v6",
+      "aiCalls": 1,
+      "preferenceDecisionCacheHits": 0,
+      "searchCount": 1,
+      "candidateCount": 147,
+      "externalSearchCount": 0,
+      "webSearchCount": 0,
+      "webDiscoveredCount": 0,
+      "webExtractionCalls": 0,
+      "webSearchCacheHits": 0,
+      "webExtractionCacheHits": 0,
+      "webParseFailureCounts": {},
+      "aiCandidateCount": 16,
+      "aiInputBytes": 15292,
+      "timingsMs": {
+        "databaseSearchMs": 23.479,
+        "initialCandidateEvaluationMs": 182.095,
+        "webExtractionMs": 0.0,
+        "aiRankMs": 3880.322,
+        "recommendationMs": 4119.036
+      }
+    },
+    "preferenceTags": [],
+    "context": {
+      "localDate": "2026-10-29",
+      "timezone": "Asia/Seoul",
+      "season": "AUTUMN",
+      "mealTime": "LUNCH",
+      "variationSeed": "514d14d6bf0cf542",
+      "personalizationMode": "CONTEXT_RANDOM"
+    }
+  },
+  "error": null
+}
+```
+
+</details>
+
+QUEUED/PROCESSING 상태에서는 result/error/completedAt이 null입니다. FAILED에서는 result=null이고 error에 code/message/retryable을 제공합니다. 상태별 필드 목록은 RecipeJobView 표와 같습니다.

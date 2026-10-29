@@ -11,9 +11,10 @@ from app.errors import DependencyUnavailable
 from app.recipes.ingredients import parse_ingredients
 from app.recipes.retrieval import canonical
 from app.recipes.schemas import Recipe, Step
+from app.recipes.web_extraction import source_servings
 
 logger = logging.getLogger(__name__)
-PARSER_VERSION = "food-safety-v3"
+PARSER_VERSION = "food-safety-v4"
 
 
 # 원문 재료 목록을 보수적으로 파싱한다. 구분이 모호한 원본은 추천·동기화하지 않는다.
@@ -25,10 +26,10 @@ def parse_recipe(row: dict) -> Recipe | None:
     if not ingredients or not steps or not row.get("RCP_SEQ") or not row.get("RCP_NM"):
         return None
     payload = {"name": row["RCP_NM"], "ingredients": [item.model_dump() for item in ingredients], "steps": [item.model_dump() for item in steps],
-               "imageUrl": row.get("ATT_FILE_NO_MAIN") or None, "parser": PARSER_VERSION}
+               "imageUrl": row.get("ATT_FILE_NO_MAIN") or None, "baseServings": source_servings(raw), "parser": PARSER_VERSION}
     revision = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return Recipe(source="FOOD_SAFETY_KOREA", sourceRecipeId=str(row["RCP_SEQ"]), sourceRevision=revision, name=payload["name"],
-                  imageUrl=payload["imageUrl"], ingredients=ingredients, steps=steps)
+                  imageUrl=payload["imageUrl"], baseServings=payload["baseServings"], ingredients=ingredients, steps=steps)
 
 
 class FoodSafetyProvider:

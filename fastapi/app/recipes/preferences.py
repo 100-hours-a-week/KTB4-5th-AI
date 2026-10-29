@@ -1,5 +1,6 @@
 """AI의 취향 적합 응답에 원문 근거를 요구한다. 알레르기/영양 판단은 하지 않는다."""
 
+from app.recipes.meal_quality import frying_steps, weak_spicy_basis
 from app.recipes.retrieval import canonical
 from app.recipes.suitability import ingredient_role
 
@@ -16,7 +17,11 @@ def valid_preference_evidence(row: dict, quote: str, tags: list[str]) -> bool:
         return False
     if {canonical(tag) for tag in tags}.intersection(SPICY_TAGS) and not any(word in text for word in SPICY_EVIDENCE):
         return False
+    if {canonical(tag) for tag in tags}.intersection(SPICY_TAGS) and weak_spicy_basis(row):
+        return False
     if {canonical(tag) for tag in tags}.intersection(MILD_TAGS) and any(word in canonical(source) for source in sources for word in SPICY_EVIDENCE):
+        return False
+    if {canonical(tag) for tag in tags}.intersection({"담백한거", "담백한맛", "담백한음식"}) and frying_steps(row):
         return False
     return True
 

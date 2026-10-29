@@ -213,7 +213,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v15"
+    policyVersion: str = "recipe-rerank-v16"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
