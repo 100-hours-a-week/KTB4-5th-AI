@@ -19,6 +19,7 @@ from app.recipes.food_safety import FoodSafetyProvider
 from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline, cover_expiring, diversify, vary_baseline
 from app.recipes.preferences import preference_search_focus, preference_shortlist
 from app.recipes.quantities import assess_quantities
+from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit
 from app.recipes.repository import RecipeRepository
 from app.recipes.retrieval import MATCH_VERSION, TITLE_MATCH_VERSION, allowed, canonical, is_excluded, missing_named_ingredients, query_variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
@@ -35,7 +36,8 @@ class RecipeService:
         self.settings = settings
         self.reasoner = reasoner or RecipeReasoner(settings)
         self._ai_slots = asyncio.Semaphore(2)
-        self._ai_retry_after = 0.0
+        self._ai_circuit = RecipeCircuit()
+        self._preference_decisions = PreferenceDecisionCache()
         self.repository = repository or RecipeRepository(settings)
         self.provider = provider or FoodSafetyProvider(settings)
         self.web_provider = WebRecipeProvider(settings, reasoner=self.reasoner)
@@ -75,6 +77,7 @@ class RecipeService:
             query_names = query_variants(original_names)
             expiring = {canonical(item.name) for item in inventory if 0 <= (item.expirationDate - today).days <= 3}
             ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model, self.settings.recipe_ai_input_max_bytes)
+            ranker.decisions, ranker.circuit = self._preference_decisions, self._ai_circuit
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit, "preferenceTags": request.preferenceTags,
@@ -204,7 +207,7 @@ class RecipeService:
                 baseline = vary_baseline(baseline, context["recommendationContext"]["variationSeed"])
                 shortlist = baseline[:self.settings.recipe_ai_max_candidates]
             ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
-            can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags)) and monotonic() >= self._ai_retry_after
+            can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags))
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
             # 웹 보충 예산에 DB 후보의 LLM 정렬 시간을 중복 차감하지 않는다. 전체 AI 예산은 별도로 유지한다.
             external_deadline += ranker.duration_ms / 1000
@@ -259,10 +262,6 @@ class RecipeService:
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
             if request.preferenceTags and not ranker.preference_matches:
                 ranker.warnings.append("NO_VERIFIED_PREFERENCE_MATCH")
-            if can_call_ai and ranker.unavailable:
-                self._ai_retry_after = monotonic() + 30
-            elif self.settings.recipe_ai_enabled and len(shortlist) > 1 and not can_call_ai:
-                ranker.warnings.append("AI_TEMPORARILY_UNAVAILABLE")
             if self.settings.recipe_ai_enabled and len(shortlist) == 1 and not request.preferenceTags:
                 ranker.warnings.append("AI_NOT_NEEDED_SINGLE_CANDIDATE")
             engine = "AI" if selected is not None else "RULE_FALLBACK" if baseline else "EMPTY"
@@ -317,7 +316,8 @@ class RecipeService:
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           mealPlan={}, warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           context=context["recommendationContext"],
-                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls or extraction_calls else None,
+                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls or extraction_calls or ranker.preference_cache_hits else None,
+                                                 "preferenceDecisionCacheHits": ranker.preference_cache_hits,
                                                  "aiCalls": ranker.calls + extraction_calls, "searchCount": searches, "candidateCount": len(ranked),
                                                   "externalSearchCount": int(external_searched), "webSearchCount": web_searches,
                                                   "webDiscoveredCount": sum(report.discovered for report in web_reports),
@@ -327,7 +327,7 @@ class RecipeService:
                                                   "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings})
 
         result = await self.cache.get_or_load(key, load)
-        if {"AI_UNAVAILABLE_OR_INVALID", "AI_TEMPORARILY_UNAVAILABLE", "EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}.intersection(result.warnings):
+        if {"AI_UNAVAILABLE_OR_INVALID", "AI_CIRCUIT_OPEN", "EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE"}.intersection(result.warnings):
             self.cache.forget(key)
         return result.model_copy(deep=True)
 

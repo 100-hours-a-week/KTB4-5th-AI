@@ -124,3 +124,9 @@ DB 사용 환경은 022_recipe_recommendation_results.sql 적용이 필요하다
 ```
 
 MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch=MATCHED는 태그 하나 이상 충족을 뜻한다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 같은 임박 활용 그룹에서는 취향 일치와 충족 태그 수를 부족 재료보다 먼저 비교한다.
+
+## 판정 재사용/오류 추적
+
+trace.preferenceDecisionCacheHits는 해당 추천 실행에서 재사용한 레시피별 취향 판정 수다. 전부 재사용하면 recommendationEngine=AI여도 aiCalls=0일 수 있다. PREFERENCE_DECISION_CACHE_USED 경고로 구분한다. 결과 전체 캐시가 적중한 응답의 trace는 원본 생성 시점의 값이다.
+
+AI_CIRCUIT_OPEN은 연결/과부하 일시 장애가 연속되어 원격 RANK 호출을 쉬는 상태이며 미평가 취향은 UNKNOWN이다. AI_TRANSIENT_RETRY는 같은 전체 시간 예산 안에서 실제 1회 재시도를 수행한 경우다. 입력/스키마/유효하지 않은 모델 출력 한 건으로 후속 사용자 요청을 막지 않는다. 캐시는 프로세스 내 최대 512개/10분이며 서버 재시작/다른 replica 간 지속성을 보증하지 않는다. SQL 변경은 없다.

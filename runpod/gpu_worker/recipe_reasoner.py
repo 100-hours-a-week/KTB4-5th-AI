@@ -106,7 +106,8 @@ class RecipeTextReasoner:
                 raise InvalidRequest("취향 태그 형식이 올바르지 않습니다.")
             output_schema["properties"]["preferenceEvidence"]["maxItems"] = min(60, len(ids) * len(tags))
             output_schema["$defs"]["PreferenceEvidence"]["properties"]["candidateId"]["enum"] = ids
-            output_schema["$defs"]["PreferenceEvidence"]["properties"]["tags"].update(minItems=1, uniqueItems=True, items={"type": "string", "enum": tags})
+            tag_items = {"type": "string", **({"enum": tags} if tags else {})}
+            output_schema["$defs"]["PreferenceEvidence"]["properties"]["tags"].update(minItems=1, uniqueItems=True, items=tag_items)
             output_schema["$defs"]["PreferenceEvidence"]["required"].append("tags")
             evidence_branches = []
             columns = request.context.get("ingredientColumns", ["ingredientNo", "name"])
@@ -223,7 +224,16 @@ class RecipeTextReasoner:
             return RecipeAiResponse(stage=request.stage, result=result, model=self.settings.ollama_model, promptVersion=PROMPT_VERSION)
         except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError) as exc:
             logger.warning("recipe_ai_failed stage=%s elapsed_ms=%.1f input_bytes=%d error_type=%s", request.stage, (perf_counter() - started) * 1000, len(context.encode()), type(exc).__name__)
-            raise ModelUnavailable("레시피 판단 모델 응답이 유효하지 않습니다.") from exc
+            error = ModelUnavailable("레시피 판단 모델 응답이 유효하지 않습니다.")
+            transient = isinstance(exc, httpx.TransportError) or isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {429, 502, 503, 504}
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                error.status_code = 429
+            if not transient:
+                error.code = "RECIPE_INVALID_MODEL_RESPONSE"
+                error.retryable = False
+                error.retry_after_ms = None
+                error.status_code = 502
+            raise error from exc
 
     # 앱 종료 시 텍스트 추론 연결을 정리한다.
     async def close(self) -> None:

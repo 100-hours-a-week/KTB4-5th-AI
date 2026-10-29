@@ -14,13 +14,14 @@ from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult
 from app.recipes.context import variation_key
 from app.recipes.preferences import valid_preference_evidence
+from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, transient_failure
 from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
 from app.recipes.suitability import assess_suitability
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v14"
+POLICY_VERSION = "recipe-rerank-v15"
 
 
 # 임박 활용 그룹을 보호하고 취향 일치 여부를 먼저 비교한 뒤 재료 분산과 구매 부담을 고려한다.
@@ -86,7 +87,7 @@ def diversify(rows: list[dict], recent_ids: list[str]) -> list[dict]:
 
 
 class MealRanker:
-    # DB 검색·분량 검증 이후에만 생성하며 슬롯 대기를 포함한 모델 호출을 최대 한 번 수행한다.
+    # DB/분량 검증 뒤 생성한다. 원격 호출은 슬롯 대기와 재시도를 포함한 전체 시간 상한을 공유한다.
     def __init__(self, reasoner: RecipeReasoner, timeout: float, slots: asyncio.Semaphore, expected_model: str, max_input_bytes: int = 16000) -> None:
         self.reasoner, self.timeout, self.slots = reasoner, timeout, slots
         self.expected_model = expected_model
@@ -104,9 +105,66 @@ class MealRanker:
         self.input_bytes = 0
         self.candidate_count = 0
         self.duration_ms = 0.0
+        self.decisions = PreferenceDecisionCache()
+        self.circuit = RecipeCircuit()
+        self.preference_cache_hits = 0
+        self._cached_rows: dict[tuple[str, str], dict[str, str]] = {}
+
+    # 원문/태그의 검증 판정을 재사용하며 순위와 재고 소모량은 현재 요청에서 다시 계산한다.
+    async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
+        tags = context.get("preferenceTags", [])
+        cached, keys = {}, {}
+        for row in shortlist if tags else []:
+            identity = (row["source"], row["sourceRecipeId"])
+            keys[identity] = self.decisions.key(row, tags, self.expected_model, PROMPT_VERSION, POLICY_VERSION)
+            evidence = self.decisions.get(keys[identity])
+            if evidence is not None:
+                cached[identity] = evidence
+        self._cached_rows = cached
+        self.preference_cache_hits += len(cached)
+        reused = bool(cached)
+        all_cached = bool(tags and shortlist and len(cached) == len(shortlist))
+        if all_cached:
+            self.preference_matches.clear()
+            self.preference_evidence.clear()
+            self.preference_tag_evidence.clear()
+            self.rejected_preference_tags.clear()
+            self.rejected_preference_identities.clear()
+            self.evaluated_identities.clear()
+            self.unavailable = False
+            selected = shortlist
+            self.model = self.expected_model
+        else:
+            selected = await self._rank(context, shortlist)
+        if selected is not None and not all_cached:
+            for identity in self.evaluated_identities:
+                if identity in keys and identity not in self.rejected_preference_identities and identity not in self.rejected_preference_tags:
+                    cached[identity] = self.decisions.remember(keys[identity], self.preference_tag_evidence.get(identity, {}))
+        for identity, evidence in cached.items():
+            self.evaluated_identities.add(identity)
+            self.rejected_preference_identities.discard(identity)
+            self.rejected_preference_tags.pop(identity, None)
+            self.preference_matches.discard(identity)
+            self.preference_evidence.pop(identity, None)
+            self.preference_tag_evidence.pop(identity, None)
+            if evidence:
+                self.preference_matches.add(identity)
+                self.preference_tag_evidence[identity] = evidence
+                self.preference_evidence[identity] = next(iter(evidence.values()))
+        if reused:
+            self.warnings.append("PREFERENCE_DECISION_CACHE_USED")
+        if selected is None:
+            return None
+        for row in selected:
+            identity = (row["source"], row["sourceRecipeId"])
+            if tags:
+                row["preferenceMatch"] = "MATCHED" if identity in self.preference_matches else "UNKNOWN"
+                row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED", "evidence": quote}
+                                                for tag, quote in self.preference_tag_evidence.get(identity, {}).items()]
+        return sorted(selected, key=eligibility_tier)
 
     # 후보 전체의 ID 순열만 수용한다. 오류·누락·중복은 기본 추천을 지우지 않고 None으로 반환한다.
-    async def rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
+    async def _rank(self, context: dict, shortlist: list[dict]) -> list[dict] | None:
         self.preference_matches = set()
         self.preference_evidence = {}
         self.preference_tag_evidence = {}
@@ -114,21 +172,40 @@ class MealRanker:
         self.rejected_preference_identities = set()
         self.evaluated_identities = set()
         self.unavailable = False
+        self.model = None
         call_started = None
+        ticket = None
         try:
             payload, window = pack_rank_input(context, shortlist, self.max_input_bytes)
+            for candidate, row in zip(payload["candidates"], window, strict=True):
+                if (row["source"], row["sourceRecipeId"]) in self._cached_rows:
+                    candidate["preferenceEvidenceOptions"] = []
             self.input_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
             self.candidate_count = len(window)
             if len(window) < len(shortlist):
                 self.warnings.append("AI_INPUT_WINDOW_REDUCED")
-            self.calls += 1
             started = monotonic()
             call_started = started
             async with asyncio.timeout(self.timeout), self.slots:
-                payload["executionBudgetSeconds"] = max(0.1, min(60, self.timeout - (monotonic() - started) - 1))
-                self.input_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
-                logger.info("recipe_ai_request candidate_count=%d input_bytes=%d format=brief budget_seconds=%.2f", len(window), self.input_bytes, payload["executionBudgetSeconds"])
-                result, model = await self.reasoner.rank(payload)
+                ticket = self.circuit.acquire()
+                if ticket is None:
+                    self.warnings.append("AI_CIRCUIT_OPEN")
+                    return None
+                for attempt in range(2):
+                    payload["executionBudgetSeconds"] = max(0.1, min(60, self.timeout - (monotonic() - started) - 1))
+                    self.input_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+                    self.calls += 1
+                    logger.info("recipe_ai_request candidate_count=%d input_bytes=%d attempt=%d budget_seconds=%.2f", len(window), self.input_bytes, attempt + 1, payload["executionBudgetSeconds"])
+                    try:
+                        result, model = await self.reasoner.rank(payload)
+                        break
+                    except AI_ERRORS as exc:
+                        limited = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429 or isinstance(exc, AppError) and exc.status_code == 429
+                        timed_out = isinstance(exc, (TimeoutError, httpx.TimeoutException))
+                        if attempt or not transient_failure(exc) or limited or timed_out or self.timeout - (monotonic() - started) <= 2:
+                            raise
+                        self.warnings.append("AI_TRANSIENT_RETRY")
+                        await asyncio.sleep(0.1)
             if not isinstance(result, RankResult) or model != self.expected_model:
                 raise ValueError("RECIPE_MODEL_OR_SCHEMA_MISMATCH")
             wanted = set(range(1, len(window) + 1))
@@ -175,7 +252,13 @@ class MealRanker:
             if constrained != ordered:
                 self.warnings.append("AI_ORDER_CONSTRAINED_BY_ELIGIBILITY")
             self.model = model
+            self.circuit.finish(ticket)
+            ticket = None
             return constrained
+        except asyncio.CancelledError:
+            if ticket is not None:
+                self.circuit.cancel(ticket)
+            raise
         except AI_ERRORS as exc:
             self.preference_matches.clear()
             self.preference_evidence.clear()
@@ -183,10 +266,13 @@ class MealRanker:
             self.rejected_preference_tags.clear()
             self.rejected_preference_identities.clear()
             self.evaluated_identities.clear()
-            self.unavailable = isinstance(exc, (AppError, httpx.HTTPError, TimeoutError))
+            self.unavailable = transient_failure(exc)
+            if ticket is not None:
+                self.circuit.finish(ticket, self.unavailable)
             allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION", "INVALID_RECIPE_PREFERENCE_IDS"}
             code = str(exc) if type(exc) is ValueError and str(exc) in allowed else "TIME_BUDGET_EXCEEDED" if isinstance(exc, TimeoutError) else "REMOTE_OR_SCHEMA_ERROR"
-            logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s prompt=%s", type(exc).__name__, code, PROMPT_VERSION)
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else exc.status_code if isinstance(exc, AppError) else None
+            logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s transient=%s status=%s prompt=%s", type(exc).__name__, code, self.unavailable, status, PROMPT_VERSION)
             self.warnings.append("AI_UNAVAILABLE_OR_INVALID")
             return None
         finally:
