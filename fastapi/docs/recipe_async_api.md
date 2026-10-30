@@ -11,6 +11,7 @@
 ```json
 {
   "requestId": "recipe-request-20261028-001",
+  "userId": 101,
   "refrigeratorId": 12,
   "inventoryFingerprint": "fb9317e41709357ffd835bc85e3042619b94b4c3a90559f94ce3ded59a16a0fe",
   "inventory": [
@@ -28,7 +29,8 @@
 | 필드 | 규칙 |
 | --- | --- |
 | requestId | 필수, 최대 500자. 같은 내용 재시도는 같은 값, 새 추천은 새 값 |
-| refrigeratorId | 필수, 양의 정수 |
+| userId | 필수, 양의 정수 JSON integer. 로그인 사용자 ID, 문자열 / boolean 불가 |
+| refrigeratorId | 필수, 양의 정수. 추천에 사용할 재고의 냉장고 ID |
 | inventoryFingerprint | 필수, 확정 재고 JSON의 SHA-256 |
 | inventory | 필수, 최대 300개, ingredientId는 양수/중복 금지 |
 | ingredientKey | 재고별 선택 필드, 검토된 기본 식재료 키. 없으면 상품명 사전 사용 |
@@ -57,7 +59,7 @@ fingerprint는 재고 ID 오름차순, 이름 NFKC/소문자/공백 제거, JSON
 
 `GET /ai/v1/recipe-recommendations/{jobId}` / 동일 내부 인증
 
-200 본문은 jobId, requestId, refrigeratorId, status, submittedAt, startedAt, completedAt, result, error다. 처리 중 result/error/completedAt은 null이다. 완료 시 result가 기존 RecommendationResponse이며 실패 시 result=null, error에 code/message/retryable을 담는다. UTC 날짜/시간은 Z로 직렬화한다.
+200 본문은 jobId, requestId, userId, refrigeratorId, status, submittedAt, startedAt, completedAt, result, error다. 처리 중 result/error/completedAt은 null이다. 완료 시 result가 기존 RecommendationResponse이며 실패 시 result=null, error에 code/message/retryable을 담는다. UTC 날짜/시간은 Z로 직렬화한다.
 
 result에는 최대 10개 recommendations, 별도 confirmationCandidates, 최종 미활용 임박 재료, 적용한 preferenceTags/context, 엔진/경고/trace가 있다. 각 레시피는 원문 재료/분량/조리 단계, 추가 구매 식재료, 분량 상태, preferenceMatch와 inventoryUsage를 포함한다.
 
@@ -91,7 +93,7 @@ v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모
 - RECIPE_CALLBACK_URL: 백엔드 레시피 작업 수신 URL
 - RECIPE_CALLBACK_API_KEY: AI → 백엔드 X-Internal-API-Key 값
 
-콜백 본문은 GET의 최종 RecipeJobView와 같다. jobId/requestId/refrigeratorId로 요청을 연결하고 result 안에 모든 레시피와 재고 ID별 배분을 함께 전달한다. 영수증 CALLBACK_URL에는 보내지 않는다. 요청 본문에서 임의 콜백 URL을 받지 않는다.
+콜백 본문은 GET의 최종 RecipeJobView와 같다. jobId/requestId/userId/refrigeratorId로 요청을 연결하고 result 안에 모든 레시피와 재고 ID별 배분을 함께 전달한다. 영수증 CALLBACK_URL에는 보내지 않는다. 요청 본문에서 임의 콜백 URL을 받지 않는다.
 
 2xx는 성공, 429/500/502/503/504와 전송 오류는 CALLBACK_MAX_ATTEMPTS 범위에서 재시도한다. 다른 HTTP 응답은 거부로 기록한다. 성공한 요청이 재시도되는 경우를 고려해 백엔드는 jobId 기준 멱등 upsert를 수행한다. 콜백 실패로 추천 결과를 FAILED로 뒤집지 않으며 GET으로 확인할 수 있다. 자동 무한 재전송은 하지 않는다.
 
@@ -133,7 +135,7 @@ AI_CIRCUIT_OPEN은 연결/과부하 일시 장애가 연속되어 원격 RANK �
 
 ### 생략 가능한 필드와 기본값
 
-생략 시 기본값이 적용되는 것은 선택 필드입니다. requestId/refrigeratorId/inventoryFingerprint/inventory는 필수이며 생략하면 HTTP400 INVALID_REQUEST입니다. null과 생략은 다릅니다. 아래 배열/문자열/정수 필드에 null을 보내면 기본값을 쓰는 것이 아니라 검증 오류입니다. ingredientKey/quantity/weightValue처럼 스키마에서 null을 허용한 필드는 각 단위 계약을 따릅니다.
+생략 시 기본값이 적용되는 것은 선택 필드입니다. requestId/userId/refrigeratorId/inventoryFingerprint/inventory는 필수이며 생략하면 HTTP400 INVALID_REQUEST입니다. null과 생략은 다릅니다. 아래 배열/문자열/정수 필드에 null을 보내면 기본값을 쓰는 것이 아니라 검증 오류입니다. ingredientKey/quantity/weightValue처럼 스키마에서 null을 허용한 필드는 각 단위 계약을 따릅니다.
 
 | 선택 필드 | 생략 시 값 | 의미 |
 | --- | --- | --- |
@@ -193,11 +195,13 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
   "requestId": "v15-deployed-ad3f6dfd2d9c45019cc5e96f313b372a",
   "status": "COMPLETED",
   "submittedAt": "2026-10-29T05:14:11.313913Z",
+  "userId": 101,
   "refrigeratorId": 928401,
   "startedAt": "2026-10-29T05:14:11.315450Z",
   "completedAt": "2026-10-29T05:14:15.443814Z",
   "result": {
     "recommendationId": "rec_52b5019669684aab8f04a2197192bdff",
+    "userId": 101,
     "refrigeratorId": 928401,
     "inventoryFingerprint": "0533f5477dac0fba20408a9c0607e69dd69d623b952ed8ae8b86df41a580603c",
     "recommendationMode": "EXCLUDE_EXPIRED",
@@ -470,3 +474,13 @@ QUEUED/PROCESSING 상태에서는 result/error/completedAt이 null입니다. FAI
 trace.recommendationCacheHit는 완료 추천 재사용 또는 동시 계산 공유입니다. 재사용 요청은 aiCalls / 검색 수 / 입력 크기 등의 작업 카운터가 0이며 timingsMs는 현재 요청의 recommendationMs입니다. recommendationId / generatedAt / 후보 진단은 원본 스냅샷입니다. RECOMMENDATION_SNAPSHOT_REUSED 경고로 구분합니다. trace.candidateCoverage는 임박 주재료별 eligible / shortlisted / evaluated / recommended 수이며 정확도나 전체 DB의 취향 적합 후보 수가 아닙니다.
 
 부족 식재료가 있으면 SHOPPING_COST_UNVERIFIED와 2만원 충족 미확인 사유를 표시합니다. 5종은 비용 환산값이 아니며 실제 가격을 생성하지 않습니다. source_processing은 원문 지문별 성공 / 실패 유예와 동시 추출 공유, replenishment는 공급 예산과 저장 승인, result_cache는 추천 스냅샷, selection은 최종 선정을 담당합니다. 독립 수집 작업 / 영속 취향 프로필은 포함하지 않습니다. 새 SQL 없이 FastAPI와 Worker recipe-grounded-v8을 함께 배포합니다.
+
+## 사용자와 냉장고 식별
+
+신규 `POST /ai/v1/recipe-recommendations`는 `userId`와 `refrigeratorId`를 함께 받습니다. `userId`는 필수 양의 정수이며 생략 / null / 0 / 음수 / 소수 / 문자열 / boolean은 HTTP 400 INVALID_REQUEST입니다. 백엔드는 로그인 사용자 ID를 확정하고 해당 냉장고의 접근 권한을 검증한 뒤 사용자 취향과 확정 재고를 전달합니다. AI 서버가 userId로 사용자 정보를 조회하거나 소유권을 검증하지는 않습니다. X-Internal-API-Key 인증은 유지합니다.
+
+202 접수 응답은 기존 jobId / requestId / status / submittedAt을 유지합니다. GET 작업 결과와 레시피 콜백의 최상위 userId / refrigeratorId, 완료 result.userId / result.refrigeratorId에는 요청한 두 ID를 반환합니다. 실패 작업에도 최상위 두 ID를 유지하며 result는 null입니다. userId 추가 이전의 완료 / 실패 이력은 알 수 없는 사용자 값을 추측하지 않고 userId=null로 조회합니다. 아래 신규 형식 예시의 userId=101은 설명용 가상 값이며 과거 시험에서 수집한 실제 사용자 ID가 아닙니다.
+
+요청 멱등 해시에 userId를 포함하므로 동일 requestId를 다른 userId로 다시 보내면 409 IDEMPOTENCY_CONFLICT입니다. requestId는 기존처럼 전체 작업 범위에서 유일해야 합니다. 새 사용자 / 새 추천은 새 requestId를 사용합니다. 추천 결과 캐시는 userId와 refrigeratorId 모두로 격리하고 같은 냉장고를 공유하는 다른 사용자의 응답 스냅샷은 재사용하지 않습니다. 공개 원천에 대한 취향 판정 캐시는 같은 원문 / 태그의 검증 결과만 재사용하며 사용자 이력이 아닙니다.
+
+두 ID는 작업의 기존 JSONB snapshot에 저장됩니다. 기존 022 테이블이 있으면 이번 변경을 위한 새 SQL은 없습니다. userId는 재고 fingerprint 계산에 포함하지 않으며 기존 재고 SHA-256 알고리즘을 유지합니다. 모델 / 외부 검색에는 userId를 보내지 않습니다. 개인 선호나 선택 이력을 AI DB에서 자동 조회 / 학습하는 기능을 추가한 것은 아니며 취향과 recentRecipeIds는 계속 백엔드가 요청에 전달합니다. 영수증 / 실물 분석 및 냉장고 단위 개인 보정 계약은 바꾸지 않습니다.

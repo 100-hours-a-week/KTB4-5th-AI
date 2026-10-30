@@ -62,6 +62,7 @@ def inventory_fingerprint(items: list[InventoryItem]) -> str:
 
 class RecommendationRequest(Contract):
     requestId: Text
+    userId: int = Field(gt=0, strict=True)
     refrigeratorId: int = Field(gt=0)
     inventoryFingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     recommendationMode: Literal["INCLUDE_EXPIRED", "EXCLUDE_EXPIRED"] = "EXCLUDE_EXPIRED"
@@ -236,6 +237,8 @@ class RecommendationTrace(Contract):
 
 class RecommendationResponse(Contract):
     recommendationId: str
+    # userId 도입 전 완료 이력은 사용자 식별값이 없어 null로 조회한다. 신규 요청은 양의 정수를 반환한다.
+    userId: int | None = Field(default=None, gt=0, strict=True)
     refrigeratorId: int
     inventoryFingerprint: str
     recommendationMode: str
@@ -261,6 +264,8 @@ class RecipeJobAccepted(Contract):
 
 
 class RecipeJobView(RecipeJobAccepted):
+    # 과거 snapshot 호환용 null이며 신규 작업은 접수한 userId를 그대로 유지한다.
+    userId: int | None = Field(default=None, gt=0, strict=True)
     refrigeratorId: int
     startedAt: datetime | None = None
     completedAt: datetime | None = None

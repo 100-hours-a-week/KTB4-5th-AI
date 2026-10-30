@@ -15,7 +15,7 @@ from app.recipes.retrieval import MATCH_VERSION, TITLE_MATCH_VERSION
 from app.recipes.schemas import RecommendationRequest, RecommendationResponse
 
 
-# 취향 요청의 새 requestId는 캐시를 무효화하지 않는다. 무취향 다양성은 요청 seed로 유지한다.
+# userId / refrigeratorId가 포함된 본문으로 사용자별 캐시를 분리한다. 새 requestId는 취향 캐시를 무효화하지 않는다.
 def recommendation_key(request: RecommendationRequest, settings: Settings, policy: str) -> str:
     body = request.model_dump(mode="json", exclude={"requestId"})
     body["preferenceTags"] = sorted(request.preferenceTags)

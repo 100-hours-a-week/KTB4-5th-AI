@@ -268,7 +268,7 @@ class RecipeService:
             extraction_calls = sum(report.extraction_calls for report in web_reports)
             logger.info("recipe_recommendation_timing request_id=%s timings_ms=%s ai_input_bytes=%d ai_candidate_count=%d", request.requestId,
                         json.dumps(timings, separators=(",", ":")), ranker.input_bytes, ranker.candidate_count)
-            return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", refrigeratorId=request.refrigeratorId,
+            return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", userId=request.userId, refrigeratorId=request.refrigeratorId,
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=[{key: value for key, value in row.items() if not key.startswith("_")} for row in result],
                                           confirmationCandidates=[{key: value for key, value in row.items() if not key.startswith("_")} for row in confirmations],

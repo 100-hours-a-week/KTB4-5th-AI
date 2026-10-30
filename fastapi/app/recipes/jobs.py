@@ -86,14 +86,14 @@ class RecipeJobs:
             if self.queue.full() or len(self.records) >= self.settings.recipe_result_max_entries:
                 REQUESTS.labels("queue_full").inc()
                 raise AppError("RECIPE_QUEUE_FULL", "현재 레시피 추천 작업량이 너무 많습니다. 잠시 후 다시 시도해 주세요.", 429, True, 3000)
-            view = RecipeJobView(jobId=f"rjob_{uuid4().hex}", requestId=body.requestId, refrigeratorId=body.refrigeratorId,
+            view = RecipeJobView(jobId=f"rjob_{uuid4().hex}", requestId=body.requestId, userId=body.userId, refrigeratorId=body.refrigeratorId,
                                  status="QUEUED", submittedAt=datetime.now(UTC))
             self.records[view.jobId] = (digest, body.model_copy(deep=True), view)
             self.by_request[body.requestId] = view.jobId
             self.queue.put_nowait(view.jobId)
             QUEUE.set(self.queue.qsize())
             REQUESTS.labels("accepted").inc()
-            logger.info("recipe.job.queued job_id=%s request_id=%s refrigerator_id=%d queue_size=%d", view.jobId, body.requestId, body.refrigeratorId, self.queue.qsize())
+            logger.info("recipe.job.queued job_id=%s request_id=%s user_id=%d refrigerator_id=%d queue_size=%d", view.jobId, body.requestId, body.userId, body.refrigeratorId, self.queue.qsize())
             return self._accepted(view)
 
     # 메모리 또는 영속 완료 이력에서 결과를 반환한다. 없어졌다면 레시피 전용 404다.
