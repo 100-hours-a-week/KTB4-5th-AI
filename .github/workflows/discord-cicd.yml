@@ -16,7 +16,7 @@ jobs:
       github.event.workflow_run.event == 'pull_request' ||
       ((github.event.workflow_run.event == 'schedule' ||
         github.event.workflow_run.event == 'workflow_dispatch') &&
-       github.event.workflow_run.name == 'RunPod 예약 시작 및 정지')
+       github.event.workflow_run.name == 'RunPod 시작 및 정지')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -90,7 +90,7 @@ jobs:
 
 
           def payload(run, jobs, part, rollback, users, success_enabled=False):
-              scheduler = run.get("name") == "RunPod 예약 시작 및 정지" and run.get("event") in ("schedule", "workflow_dispatch")
+              scheduler = run.get("name") == "RunPod 시작 및 정지" and run.get("event") in ("schedule", "workflow_dispatch")
               if run.get("event") not in ("push", "pull_request") and not scheduler:
                   return None
               failed = [job for job in jobs if job.get("conclusion") in ("failure", "timed_out", "action_required", "startup_failure")]
@@ -155,7 +155,7 @@ jobs:
               with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
                   event = json.load(source)
               run = event["workflow_run"]
-              scheduler = run.get("name") == "RunPod 예약 시작 및 정지" and run.get("event") in ("schedule", "workflow_dispatch")
+              scheduler = run.get("name") == "RunPod 시작 및 정지" and run.get("event") in ("schedule", "workflow_dispatch")
               if run.get("event") not in ("push", "pull_request") and not scheduler:
                   return
               repo = os.environ["GITHUB_REPOSITORY"]
