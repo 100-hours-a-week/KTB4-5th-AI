@@ -1,6 +1,6 @@
 # 냉장고 레시피 추천 설계 v19
 
-정책은 `recipe-rerank-v19`, Worker 계약은 `recipe-grounded-v9`이다. FastAPI와 Worker를 함께 배포한다. 원천별 맛 평가에는 신규 023 SQL이 필요하다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
+정책은 `recipe-rerank-v19`, Worker 계약은 `recipe-grounded-v10`이다. FastAPI와 Worker를 함께 배포한다. 원천별 맛 평가에는 신규 023 SQL이 필요하다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
 
 ## 역할과 처리 흐름
 

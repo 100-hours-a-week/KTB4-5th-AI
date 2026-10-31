@@ -165,6 +165,7 @@ class OllamaFoodClassifier:
                 {"role": "user", "content": user_prompt},
             ],
             "options": {
+                "num_ctx": self._settings.ollama_num_ctx,
                 "temperature": self._settings.ollama_temperature,
                 "seed": 42,
                 "num_predict": min(self._settings.ollama_num_predict, 48 + len(lines) * 16),
@@ -252,6 +253,7 @@ class OllamaFoodClassifier:
                 },
             ],
             "options": {
+                "num_ctx": self._settings.ollama_num_ctx,
                 "temperature": self._settings.ollama_temperature,
                 "seed": 42,
                 # 여러 실물 상품을 구조화하면 512~1024토큰에서도 JSON이 중간에 잘릴 수 있다.
@@ -338,6 +340,7 @@ class OllamaFoodClassifier:
                 },
             ],
             "options": {
+                "num_ctx": self._settings.ollama_num_ctx,
                 "temperature": self._settings.ollama_temperature,
                 "seed": 42,
                 "num_predict": 512,

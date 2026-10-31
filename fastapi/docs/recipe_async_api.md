@@ -473,7 +473,7 @@ QUEUED/PROCESSING 상태에서는 result/error/completedAt이 null입니다. FAI
 
 trace.recommendationCacheHit는 완료 추천 재사용 또는 동시 계산 공유입니다. 재사용 요청은 aiCalls / 검색 수 / 입력 크기 등의 작업 카운터가 0이며 timingsMs는 현재 요청의 recommendationMs입니다. recommendationId / generatedAt / 후보 진단은 원본 스냅샷입니다. RECOMMENDATION_SNAPSHOT_REUSED 경고로 구분합니다. trace.candidateCoverage는 임박 주재료별 eligible / shortlisted / evaluated / recommended 수이며 정확도나 전체 DB의 취향 적합 후보 수가 아닙니다.
 
-부족 식재료가 있으면 SHOPPING_COST_UNVERIFIED와 2만원 충족 미확인 사유를 표시합니다. 5종은 비용 환산값이 아니며 실제 가격을 생성하지 않습니다. source_processing은 원문 지문별 성공 / 실패 유예와 동시 추출 공유, replenishment는 공급 예산과 저장 승인, result_cache는 추천 스냅샷, selection은 최종 선정을 담당합니다. 독립 수집 작업 / 영속 취향 프로필은 포함하지 않습니다. 원천 맛 평가의 023 SQL을 먼저 적용하고 FastAPI와 Worker recipe-grounded-v9을 함께 배포합니다.
+부족 식재료가 있으면 SHOPPING_COST_UNVERIFIED와 2만원 충족 미확인 사유를 표시합니다. 5종은 비용 환산값이 아니며 실제 가격을 생성하지 않습니다. source_processing은 원문 지문별 성공 / 실패 유예와 동시 추출 공유, replenishment는 공급 예산과 저장 승인, result_cache는 추천 스냅샷, selection은 최종 선정을 담당합니다. 독립 수집 작업 / 영속 취향 프로필은 포함하지 않습니다. 원천 맛 평가의 023 SQL을 먼저 적용하고 FastAPI와 Worker recipe-grounded-v10을 함께 배포합니다.
 
 ## 사용자와 냉장고 식별
 

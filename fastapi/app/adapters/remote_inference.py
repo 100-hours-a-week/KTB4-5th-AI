@@ -182,10 +182,21 @@ class RemoteInferenceClient:
             try:
                 worker_url = await self._worker_url()
                 latency("discovery_finished", elapsed_ms=round((time.monotonic()-phase_started)*1000, 3))
+                # Worker에는 주소 탐색 후 남은 예산만 전달하고 왕복 / 취소 전달 여유를 남긴다.
+                context = dict(payload.get("context", {}))
+                requested = context.get("executionBudgetSeconds", timeout)
+                remaining = min(float(requested), timeout) - (time.monotonic()-started)
+                worker_budget = remaining - self._settings.recipe_worker_transport_margin_seconds
+                if worker_budget <= 0.1:
+                    raise TimeoutError("RECIPE_WORKER_BUDGET_EXHAUSTED")
+                context["executionBudgetSeconds"] = min(60, worker_budget)
+                outgoing = {**payload, "context": context}
+                latency("worker_budget_assigned", budget_seconds=round(context["executionBudgetSeconds"], 3),
+                        transport_margin_seconds=self._settings.recipe_worker_transport_margin_seconds)
                 phase, phase_started = "worker_http", time.monotonic()
                 headers = {"X-Worker-API-Key": self._settings.remote_inference_api_key or "",
                            "X-Request-ID": TRACE_ID.get(), "X-Recipe-Call-ID": CALL_ID.get()}
-                response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=payload, headers=headers, timeout=timeout)
+                response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=outgoing, headers=headers, timeout=max(0.1, remaining))
                 status = response.status_code
                 response.raise_for_status()
                 result = response.json()

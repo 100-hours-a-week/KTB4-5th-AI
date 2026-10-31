@@ -18,7 +18,7 @@ from app.recipes.source_parsing import parse_failure_reason, parse_web_recipe
 from app.recipes.tavily import DiscoveryHit
 from app.recipes.web_extraction import source_servings, source_text, validate_extraction
 
-PARSER_VERSION = "recipe-source-v1"
+PARSER_VERSION = "recipe-source-v2"
 
 
 @dataclass
@@ -58,7 +58,7 @@ class RecipeSourceProcessor:
             saved = entry[1]
             return replace(saved, recipe=saved.recipe.model_copy(deep=True) if saved.recipe else None, calls=0, duration_ms=0, reused=True, deferred=saved.recipe is None)
         self.entries.pop(key, None)
-        # モデル実行枠がない場合に、失敗を長期保存して将来の評価機会を消さない。
+        # 모델 실행 예산이 없을 때 실패를 오래 저장해 이후 추출 기회를 없애지 않는다.
         flight_key = key + (":model" if allow_model else ":parse")
         flight = self.flights.get(flight_key)
         owner = flight is None
@@ -110,14 +110,16 @@ class RecipeSourceProcessor:
         failure = parse_failure_reason(text)
         if failure in {"MIXED_BATCH", "EMPTY_BODY"} or not allow_model or not self.reasoner or not self.settings.recipe_ai_enabled:
             return SourceOutcome(failure=failure)
+        if len(text.splitlines()) > 2000:
+            return SourceOutcome(failure="EXTRACTION_INPUT_TOO_LARGE")
         if len(text.encode()) > 24000:
             return SourceOutcome(failure="EXTRACTION_INPUT_TOO_LARGE")
-        if timeout_seconds < 1:
+        if timeout_seconds < 3 + self.settings.recipe_worker_transport_margin_seconds:
             return SourceOutcome(failure="SOURCE_BUDGET_EXHAUSTED", unavailable=True)
         started = monotonic()
         outcome = SourceOutcome(calls=1)
         try:
-            budget = min(15.0, max(0.1, timeout_seconds - 0.1))
+            budget = min(15.0, timeout_seconds)
             async with asyncio.timeout(min(16.0, timeout_seconds)):
                 extracted = await self.reasoner.extract({"sourceTitle": hit.title, "sourceText": text, "executionBudgetSeconds": budget})
             verified = validate_extraction(extracted, text, hit.title)

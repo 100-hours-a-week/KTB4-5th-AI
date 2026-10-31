@@ -126,4 +126,8 @@ def validate_extraction(result: ExtractedRecipe, text: str, title: str) -> dict 
     declared = [line for line in numbered if re.search(r"넣|썰|썹|볶|끓|찜|찌|굽|구워|데치|삶|섞|버무|헹|자르|덮|뒤집|식혀", line)]
     if any(not any(line in step for step in result.steps) for line in declared):
         return None
+    # 번호 단계에 이어지는 같은 문단의 시간 / 분량 / 마무리 문장도 빠뜨리지 않는다.
+    paragraphs = numbered_instructions(text.splitlines())
+    if paragraphs and any(not any(paragraph in step for step in result.steps) for paragraph in paragraphs):
+        return None
     return {"name": result.title, "ingredients": ingredients, "steps": result.steps}

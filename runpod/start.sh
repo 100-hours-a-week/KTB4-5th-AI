@@ -28,6 +28,15 @@ if [[ -s "$supervisor_pid_file" ]]; then
 fi
 printf '%s\n' "$$" > "$supervisor_pid_file"
 
+export OLLAMA_NUM_CTX="${OLLAMA_NUM_CTX:-${OLLAMA_CONTEXT_LENGTH:-32768}}"
+export OLLAMA_CONTEXT_LENGTH="$OLLAMA_NUM_CTX"
+case "$OLLAMA_NUM_CTX" in
+    ''|*[!0-9]*) echo "OLLAMA_NUM_CTX는 8192~32768 정수여야 합니다." >&2; exit 1 ;;
+esac
+if (( OLLAMA_NUM_CTX < 8192 || OLLAMA_NUM_CTX > 32768 )); then
+    echo "OLLAMA_NUM_CTX는 8192~32768 범위여야 합니다." >&2
+    exit 1
+fi
 export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-/app/.ollama/models}"
 # Colab이 주입하는 Jupyter 전용 matplotlib backend는 격리된 Worker venv에서
@@ -195,7 +204,9 @@ import urllib.request
 payload = json.dumps(
     {
         "model": os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
-        "prompt": "",
+        "prompt": "Reply OK only.",
+        "think": False,
+        "options": {"num_ctx": int(os.environ["OLLAMA_NUM_CTX"]), "num_predict": 1, "temperature": 0},
         "stream": False,
         "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
     }
@@ -208,7 +219,10 @@ request = urllib.request.Request(
 with urllib.request.urlopen(request, timeout=600) as response:
     if response.status != 200:
         raise SystemExit(f"Ollama 모델 워밍업 실패: HTTP {response.status}")
-print("Ollama 모델 GPU 워밍업 완료", flush=True)
+    result = json.loads(response.read())
+    if result.get("done") is not True or not isinstance(result.get("eval_count"), int) or result["eval_count"] < 1:
+        raise SystemExit("Ollama 워밍업 응답에서 실제 토큰 생성 완료를 확인하지 못했습니다.")
+print("Ollama 모델 GPU 워밍업 / 첫 토큰 추론 완료", flush=True)
 PY
     fi
 

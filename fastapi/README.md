@@ -145,3 +145,5 @@ FastAPI는 분석 후보를 만들고 전달하는 역할까지만 담당한다.
 FastAPI는 원천 레시피별 맛 평가를 PostgreSQL에서 조회해 전체 후보의 사용자 취향에 연결한다. 별도 일괄 평가 모듈이 기존 원격 Gemma의 PROFILE을 호출하고 원문 인용 / 분량 근거를 검증해 저장한다. 미확정은 유지하며 사용자별 선호 학습이나 실제 맛 측정을 뜻하지 않는다. 저장소는 023 SQL, 상세 구조는 [맛 특성 설계](docs/recipe_taste_profiles.md)를 따른다.
 
 레시피 지연은 `recipe.latency` 로그에서 요청별 trace_id / 원격 호출별 call_id로 추적한다. FastAPI 주소 탐색 / 슬롯 대기와 Worker 슬롯 / 모델 시간, 취소 시 마지막 단계를 구분한다. 상세 필드와 한계는 `docs/recipe_latency_logging.md`를 참고한다.
+
+공유 모델 context 통일과 원문 행 선택 기반 웹 추출은 `docs/recipe_runtime_efficiency.md`를 참고한다. 공개 결과는 기존 원문 조리 단계를 유지한다.

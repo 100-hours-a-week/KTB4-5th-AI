@@ -196,3 +196,5 @@ Worker의 목표는 GPU 추론을 독립적으로 확장·교체할 수 있게 �
 기존 Gemma에 PROFILE 단계를 추가해 원문 전체 재료 / 분량 / 조리 과정에서 매운맛 / 단맛 / 짠맛 / 담백함 / 칼칼함의 근거를 독립 평가한다. 원문 번호와 인용 조합은 출력 스키마로 제한한다. Worker가 사용자 DB에 접근하거나 평가를 저장하지 않으며 FastAPI가 검증 / 저장 / 추천 연결을 담당한다. 별도 모델을 띄우지 않고 기존 LLM 자원을 공유한다. 이 평가는 실제 맛 / 강도 / 영양 측정을 보증하지 않는다.
 
 레시피 지연은 `recipe.latency` 로그에서 요청별 trace_id / 원격 호출별 call_id로 추적한다. FastAPI 주소 탐색 / 슬롯 대기와 Worker 슬롯 / 모델 시간, 취소 시 마지막 단계를 구분한다. 상세 필드와 한계는 `../fastapi/docs/recipe_latency_logging.md`를 참고한다.
+
+공유 모델 context 통일과 원문 행 선택 기반 웹 추출은 `../fastapi/docs/recipe_runtime_efficiency.md`를 참고한다. 공개 결과는 기존 원문 조리 단계를 유지한다.
