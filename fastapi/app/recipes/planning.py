@@ -10,8 +10,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.errors import AppError
+from app.logging.recipe_trace import latency
 from app.recipes.ai import RecipeReasoner
-from app.recipes.ai_contract import PROMPT_VERSION, RankResult
+from app.recipes.ai_contract import PROMPT_VERSION, RankResult, TasteProfile
 from app.recipes.candidate_pool import representative_candidates
 from app.recipes.context import variation_key
 from app.recipes.meal_quality import frying_steps, taste_context, weak_spicy_basis
@@ -21,10 +22,11 @@ from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
 from app.recipes.selection import candidate_priority, select_recommendations
 from app.recipes.suitability import assess_suitability
+from app.recipes.taste_profiles import preference_decisions, uncertain_unmatched_tags
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v18"
+POLICY_VERSION = "recipe-rerank-v19"
 
 
 # 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
@@ -79,6 +81,39 @@ class MealRanker:
                 self.preference_matches.add(identity)
                 self.preference_tag_evidence[identity] = evidence
                 self.preference_evidence[identity] = next(iter(evidence.values()))
+        # 원천별 평가를 현재 태그에 연결한다. UNKNOWN을 요청별 모델 주장이나 오래된 캐시로 덮지 않는다.
+        for row in rows:
+            if row.get("tasteProfile") is None:
+                identity = (row["source"], row["sourceRecipeId"])
+                if identity in self.evaluated_identities:
+                    uncertain = uncertain_unmatched_tags(row, tags) - self.preference_tag_evidence.get(identity, {}).keys()
+                    if uncertain:
+                        self.rejected_preference_tags.setdefault(identity, set()).update(uncertain)
+                continue
+            decisions = preference_decisions(TasteProfile.model_validate(row["tasteProfile"]), tags)
+            row["_profileTagStatuses"] = {tag: status for tag, (status, _) in decisions.items()}
+            identity = (row["source"], row["sourceRecipeId"])
+            evidence = self.preference_tag_evidence.setdefault(identity, {})
+            for tag, (status, quote) in decisions.items():
+                evidence.pop(tag, None)
+                if status == "MATCHED" and quote:
+                    evidence[tag] = quote
+                if status == "UNKNOWN":
+                    self.rejected_preference_tags.setdefault(identity, set()).add(tag)
+                elif identity in self.rejected_preference_tags:
+                    self.rejected_preference_tags[identity].discard(tag)
+                    if not self.rejected_preference_tags[identity]:
+                        self.rejected_preference_tags.pop(identity)
+            if decisions:
+                self.evaluated_identities.add(identity)
+                self.model = self.expected_model
+            if set(tags) <= decisions.keys():
+                self.rejected_preference_identities.discard(identity)
+            self.preference_matches.discard(identity)
+            self.preference_evidence.pop(identity, None)
+            if evidence:
+                self.preference_matches.add(identity)
+                self.preference_evidence[identity] = next(iter(evidence.values()))
         if self.preference_cache_hits:
             self.warnings.append("PREFERENCE_DECISION_CACHE_USED")
 
@@ -94,7 +129,16 @@ class MealRanker:
                 cached[identity] = evidence
         self._cached_rows = cached
         self.preference_cache_hits += len(cached)
-        reused = bool(cached)
+        # 저장된 원천 평가가 모든 요청 태그를 다루면 같은 원문을 다시 GPU에 보내지 않는다.
+        for row in shortlist if tags else []:
+            if row.get("tasteProfile") is None:
+                continue
+            decisions = preference_decisions(TasteProfile.model_validate(row["tasteProfile"]), tags)
+            if set(tags) <= decisions.keys():
+                cached[(row["source"], row["sourceRecipeId"])] = {tag: quote for tag, (status, quote) in decisions.items()
+                                                                 if status == "MATCHED" and quote}
+        self._cached_rows = cached
+        reused = bool(self.preference_cache_hits)
         # 평가 예산 밖 후보 때문에 같은 창을 반복 추론하지 않는다. 창 밖 후보는 기존 UNKNOWN 정책을 유지한다.
         fitted = shortlist
         if tags and cached:
@@ -118,6 +162,11 @@ class MealRanker:
         else:
             selected = await self._rank(context, shortlist)
         if selected is not None and not all_cached:
+            for row in selected:
+                identity = (row["source"], row["sourceRecipeId"])
+                uncertain = uncertain_unmatched_tags(row, tags) - self.preference_tag_evidence.get(identity, {}).keys()
+                if row.get("tasteProfile") is None and uncertain:
+                    self.rejected_preference_tags.setdefault(identity, set()).update(uncertain)
             for identity in self.evaluated_identities:
                 if identity in keys and identity not in self.rejected_preference_identities and identity not in self.rejected_preference_tags:
                     cached[identity] = self.decisions.remember(keys[identity], self.preference_tag_evidence.get(identity, {}))
@@ -167,7 +216,9 @@ class MealRanker:
                 self.warnings.append("AI_INPUT_WINDOW_REDUCED")
             started = monotonic()
             call_started = started
+            latency("fastapi_slot_wait_started", budget_seconds=self.timeout)
             async with asyncio.timeout(self.timeout), self.slots:
+                latency("fastapi_slot_acquired", wait_ms=round((monotonic()-started)*1000, 3))
                 ticket = self.circuit.acquire()
                 if ticket is None:
                     self.warnings.append("AI_CIRCUIT_OPEN")
@@ -258,6 +309,7 @@ class MealRanker:
             return None
         finally:
             if call_started is not None:
+                latency("rank_finished", total_ms=round((monotonic()-call_started)*1000, 3), calls=self.calls)
                 self.duration_ms += (monotonic() - call_started) * 1000
 
 

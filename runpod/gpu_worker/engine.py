@@ -23,6 +23,7 @@ from app.domain.receipt_rules import (
     sanitize_lines,
 )
 from app.errors import ModelUnavailable
+from app.logging.recipe_trace import latency
 from app.schemas import (
     InputHint,
     RemoteInferenceRequest,
@@ -68,14 +69,31 @@ class GpuInferenceEngine:
         budget = request.context.get("executionBudgetSeconds", 45)
         if type(budget) not in (int, float) or not math.isfinite(budget) or not 0 < budget <= 60:
             raise ModelUnavailable("레시피 실행 시간 예산이 올바르지 않습니다.")
-        started = perf_counter()
+        started = phase_started = perf_counter()
+        phase, outcome = "worker_slot_wait", "error"
+        latency("worker_started", stage=request.stage, budget_seconds=budget)
         try:
-            async with asyncio.timeout(budget), self._inference_semaphore, self._llm_semaphore:
-                logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter() - started) * 1000)
-                return await self._recipe_reasoner.reason(request)
+            async with asyncio.timeout(budget):
+                async with self._inference_semaphore:
+                    latency("worker_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
+                    phase, phase_started = "llm_slot_wait", perf_counter()
+                    async with self._llm_semaphore:
+                        latency("llm_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
+                        logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter()-started)*1000)
+                        phase, phase_started = "model", perf_counter()
+                        result = await self._recipe_reasoner.reason(request)
+                        outcome = "success"
+                        return result
         except TimeoutError as exc:
+            outcome = "timeout"
             logger.warning("recipe_ai_budget_exceeded stage=%s budget_seconds=%.1f", request.stage, budget)
             raise ModelUnavailable("레시피 판단 시간 예산을 초과했습니다.") from exc
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            latency("worker_finished", stage=request.stage, outcome=outcome, current_phase=phase,
+                    phase_ms=round((perf_counter()-phase_started)*1000, 3), total_ms=round((perf_counter()-started)*1000, 3))
 
     # 이미지 URL을 한 번 내려받아 입력 유형·OCR·식품행 모델 후보를 한 응답으로 반환한다.
     async def infer(self, request: RemoteInferenceRequest) -> RemoteInferenceResponse:

@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.recipes.ai_contract import TasteProfile
 from app.schemas import Category
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
@@ -208,16 +209,18 @@ class RecommendedRecipe(RecipeSnapshot):
     confirmationReasons: list[str] = Field(default_factory=list)
     usesExpiringMainIngredients: list[str] = Field(default_factory=list)
     preferenceMatch: Literal["MATCHED", "NOT_MATCHED", "UNKNOWN", "NOT_REQUESTED"] = "NOT_REQUESTED"
+    tasteProfile: TasteProfile | None = None
     preferenceEvidence: str | None = None
     preferenceAssessments: list[PreferenceAssessment] = Field(default_factory=list)
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v18"
+    policyVersion: str = "recipe-rerank-v19"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
+    tasteProfileCount: int = 0
     preferenceDecisionCacheHits: int = 0
     recommendationCacheHit: bool = False
     candidateCoverage: dict[str, dict[str, int]] = Field(default_factory=dict)

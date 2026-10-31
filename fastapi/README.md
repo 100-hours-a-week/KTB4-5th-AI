@@ -139,3 +139,9 @@ FastAPI는 분석 후보를 만들고 전달하는 역할까지만 담당한다.
 [데이터베이스 문서](docs/database.md)에서 설명한다.
 
 확정 재고 기반 레시피 추천·원본 저장·백엔드 동기화 구조는 [레시피 문서](docs/recipes.md)에서 설명한다.
+
+### 레시피 원천 맛 평가
+
+FastAPI는 원천 레시피별 맛 평가를 PostgreSQL에서 조회해 전체 후보의 사용자 취향에 연결한다. 별도 일괄 평가 모듈이 기존 원격 Gemma의 PROFILE을 호출하고 원문 인용 / 분량 근거를 검증해 저장한다. 미확정은 유지하며 사용자별 선호 학습이나 실제 맛 측정을 뜻하지 않는다. 저장소는 023 SQL, 상세 구조는 [맛 특성 설계](docs/recipe_taste_profiles.md)를 따른다.
+
+레시피 지연은 `recipe.latency` 로그에서 요청별 trace_id / 원격 호출별 call_id로 추적한다. FastAPI 주소 탐색 / 슬롯 대기와 Worker 슬롯 / 모델 시간, 취소 시 마지막 단계를 구분한다. 상세 필드와 한계는 `docs/recipe_latency_logging.md`를 참고한다.

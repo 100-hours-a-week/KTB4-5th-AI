@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     recipe_ai_rank_timeout_seconds: float = Field(default=20, ge=2, le=60)
     recipe_supply_timeout_seconds: float = Field(default=8, ge=1, le=20)
     recipe_ai_input_max_bytes: int = Field(default=16000, ge=4000, le=24000)
+    recipe_taste_profiles_enabled: bool = True
     recipe_ai_max_candidates: int = Field(default=20, ge=3, le=20)
     recipe_queue_maxsize: int = Field(default=100, ge=1, le=100)
     recipe_consumer_count: int = Field(default=2, ge=1, le=4)

@@ -1,6 +1,6 @@
-# 냉장고 레시피 추천 설계 v18
+# 냉장고 레시피 추천 설계 v19
 
-정책은 `recipe-rerank-v18`, Worker 계약은 `recipe-grounded-v8`이다. FastAPI와 Worker를 함께 배포한다. 이 변경에 신규 SQL은 없다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
+정책은 `recipe-rerank-v19`, Worker 계약은 `recipe-grounded-v9`이다. FastAPI와 Worker를 함께 배포한다. 원천별 맛 평가에는 신규 023 SQL이 필요하다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
 
 ## 역할과 처리 흐름
 
@@ -9,7 +9,8 @@ flowchart TD
     POST[확정 재고 ID / 취향 접수] --> JOB[HTTP 202 / 레시피 전용 큐]
     JOB --> CACHE{추천 내용 캐시}
     CACHE -->|miss| DB[DB 원천 조회 / 제외 재료 / 분량 검증]
-    DB --> POOL[임박 재료별 대표 후보 확보]
+    DB --> TASTE[전체 후보의 원천 맛 평가 조회]
+    TASTE --> POOL[임박 재료별 대표 후보 확보]
     POOL --> EVAL[Gemma 취향 근거 평가 / 원문 인용 검증]
     EVAL --> NEED{후보 부재 또는 평가된 후보의 취향 부족}
     NEED -->|보충 필요 / 1회| SUPPLY[공유 시간 상한 내 공식 원천 / Tavily]
@@ -101,4 +102,20 @@ RANK 연속 일시 장애 3회면 30초 호출을 제한하고 복구 시험 하
 
 요청 멱등 해시에 userId를 포함하므로 동일 requestId를 다른 userId로 다시 보내면 409 IDEMPOTENCY_CONFLICT입니다. requestId는 기존처럼 전체 작업 범위에서 유일해야 합니다. 새 사용자 / 새 추천은 새 requestId를 사용합니다. 추천 결과 캐시는 userId와 refrigeratorId 모두로 격리하고 같은 냉장고를 공유하는 다른 사용자의 응답 스냅샷은 재사용하지 않습니다. 공개 원천에 대한 취향 판정 캐시는 같은 원문 / 태그의 검증 결과만 재사용하며 사용자 이력이 아닙니다.
 
-두 ID는 작업의 기존 JSONB snapshot에 저장됩니다. 기존 022 테이블이 있으면 이번 변경을 위한 새 SQL은 없습니다. userId는 재고 fingerprint 계산에 포함하지 않으며 기존 재고 SHA-256 알고리즘을 유지합니다. 모델 / 외부 검색에는 userId를 보내지 않습니다. 개인 선호나 선택 이력을 AI DB에서 자동 조회 / 학습하는 기능을 추가한 것은 아니며 취향과 recentRecipeIds는 계속 백엔드가 요청에 전달합니다. 영수증 / 실물 분석 및 냉장고 단위 개인 보정 계약은 바꾸지 않습니다.
+두 ID는 작업의 기존 JSONB snapshot에 저장됩니다. 기존 022 테이블이 있으면 userId 추가 자체에는 새 SQL이 없습니다. 원천 맛 평가 기능은 별도로 023 SQL이 필요합니다. userId는 재고 fingerprint 계산에 포함하지 않으며 기존 재고 SHA-256 알고리즘을 유지합니다. 모델 / 외부 검색에는 userId를 보내지 않습니다. 개인 선호나 선택 이력을 AI DB에서 자동 조회 / 학습하는 기능을 추가한 것은 아니며 취향과 recentRecipeIds는 계속 백엔드가 요청에 전달합니다. 영수증 / 실물 분석 및 냉장고 단위 개인 보정 계약은 바꾸지 않습니다.
+
+## 원천별 맛 특성 평가
+
+레시피 원문 전체를 기존 Gemma의 PROFILE 단계로 사전 평가하고 `recipe_ai.taste_profiles`에 저장합니다. SPICY / SWEET / SALTY / MILD / PEPPERY를 각각 SUPPORTED / NOT_SUPPORTED / UNKNOWN으로 평가합니다. 칼칼함은 일반 매운맛과 분리하며 국물요리로만 제한하지 않습니다. SUPPORTED는 AI 추정과 원문 근거 검증 통과이며 실제 맛 / 맛 강도 / 관능평가 정답을 확정한 값이 아닙니다.
+
+원문 번호와 인용의 조합을 출력 스키마로 제한하고, 공백 차이 외의 다른 내용 / 번호는 거부합니다. 단일 재료명만으로 맛을 확정하지 않으며 조리 구절과 분량 근거를 검증합니다. 튀김 / 강한 양념의 담백함 주장과 근거 부족은 UNKNOWN으로 보류합니다. 원문 한 배치의 분량이 모두 있으면 기준 인분 미상이어도 정성 평가가 가능하지만 인분 / 사용량 환산은 하지 않습니다.
+
+추천 시 전체 검색 후보의 현재 원문 / 모델명 / 프롬프트 / 평가 버전과 일치하는 저장 평가를 조회합니다. 저장 평가는 AI 입력 창 밖 후보에도 적용하고, 준비되지 않은 원천 / 별도 요구는 기존 제한된 요청별 평가와 규칙 결과로 처리합니다. 모든 원천이 사전 평가된 상태라는 뜻은 아닙니다. 저장된 UNKNOWN을 단일 재료명 주장으로 덮지 않습니다.
+
+추천 항목의 `tasteProfile`은 기본 null이며 dimensions 배열로 평가와 evidence(field / referenceNo / quote), limitations를 제공합니다. 기존 preferenceAssessments는 요청 태그별 상태를 유지합니다. trace.tasteProfileCount는 일반 유효 후보 중 평가가 연결된 수이며 모델 호출 수가 아닙니다. TASTE_PROFILE_USED와 구분하고, 프로필만 재사용하면 recommendationEngine=AI / aiCalls=0일 수 있습니다. 사진 분석 / 개인 피드백 / 레시피 원천 동기화 API는 변경하지 않습니다.
+
+FastAPI / Worker를 함께 배포하고 먼저 DB 소유자 권한으로 023_recipe_taste_profiles.sql을 적용해야 합니다. dev receipt_ai 역할은 CREATE 권한이 없어 현재 직접 적용은 거부됐습니다. SQL에 해당 역할의 새 테이블 / 시퀀스 최소 권한을 포함했으며 다른 환경 역할은 운영자가 확인합니다. 조회 오류 / 2초 초과 시 TASTE_PROFILE_STORE_UNAVAILABLE로 기존 추천을 유지합니다.
+
+사전 평가는 배포 환경에서 `python -m app.recipes.profile_backfill --limit 20 --after-id 0`으로 명시한 ACTIVE 승인 원천만 순차 처리합니다. 동일 버전을 재사용하고 처리 중 바뀐 원천 / 미등록 웹 원천은 저장하지 않습니다. 기존 GPU 자원을 공유하므로 작은 묶음으로 비혼잡 시간에 실행합니다. 별도 자동 수집 데몬이나 모든 원천의 평가 완료를 뜻하지 않습니다.
+
+실제 RunPod 원문 시험과 별개로 사람 검토 정답셋은 아직 필요합니다. taste_evaluation 도구는 맛별 precision / recall / coverage / abstained를 구분하며 미확정을 정답으로 계산하지 않습니다. 원문 검토 라벨과 실제 관능평가를 구분합니다.

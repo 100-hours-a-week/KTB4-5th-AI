@@ -2,7 +2,7 @@
 
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.config import Settings
-from app.recipes.ai_contract import PROMPT_VERSION, ExtractedRecipe, RankResult, RecipeAiResponse
+from app.recipes.ai_contract import PROMPT_VERSION, ExtractedRecipe, RankResult, RecipeAiResponse, TasteProfile
 
 
 class RecipeReasoner:
@@ -17,6 +17,13 @@ class RecipeReasoner:
         if not isinstance(result.result, RankResult):
             raise ValueError("RECIPE_RANK_SCHEMA_MISMATCH")
         return result.result, result.model
+
+    # 원천 전체의 독립 맛 특성을 평가한다. 사용자 ID / 재고 / 외부 검색 권한은 전달하지 않는다.
+    async def profile(self, context: dict) -> tuple[TasteProfile, str]:
+        response = await self._call("PROFILE", context)
+        if not isinstance(response.result, TasteProfile):
+            raise ValueError("RECIPE_PROFILE_SCHEMA_MISMATCH")
+        return response.result, response.model
 
     # 웹 본문을 원문 인용으로만 구조화한다. 외부 검색이나 DB 쓰기는 Worker에 위임하지 않는다.
     async def extract(self, context: dict) -> ExtractedRecipe:

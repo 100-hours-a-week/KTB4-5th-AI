@@ -4,6 +4,7 @@ import re
 import time
 from pathlib import PurePosixPath
 from urllib.parse import quote, urljoin
+from uuid import uuid4
 
 import httpx
 
@@ -17,6 +18,7 @@ from app.domain.models import (
     RemoteInferenceBundle,
 )
 from app.errors import DependencyUnavailable, InvalidRequest
+from app.logging.recipe_trace import CALL_ID, TRACE_ID, latency, recipe_trace
 from app.schemas import RemoteInferenceResponse
 
 logger = logging.getLogger(__name__)
@@ -173,11 +175,31 @@ class RemoteInferenceClient:
 
     # 이미지 경로와 같은 인증·Pod 탐색을 사용하되 레시피 추론은 재시도 없이 제한 시간 내 호출한다.
     async def reason_recipe(self, payload: dict, timeout: float) -> dict:
-        worker_url = await self._worker_url()
-        headers = {"X-Worker-API-Key": self._settings.remote_inference_api_key or ""}
-        response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=payload, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return response.json()
+        with recipe_trace(TRACE_ID.get() if TRACE_ID.get() != "-" else None, uuid4().hex):
+            started, phase_started = time.monotonic(), time.monotonic()
+            phase, outcome, status = "discovery", "error", None
+            latency("remote_started", stage=payload.get("stage"))
+            try:
+                worker_url = await self._worker_url()
+                latency("discovery_finished", elapsed_ms=round((time.monotonic()-phase_started)*1000, 3))
+                phase, phase_started = "worker_http", time.monotonic()
+                headers = {"X-Worker-API-Key": self._settings.remote_inference_api_key or "",
+                           "X-Request-ID": TRACE_ID.get(), "X-Recipe-Call-ID": CALL_ID.get()}
+                response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=payload, headers=headers, timeout=timeout)
+                status = response.status_code
+                response.raise_for_status()
+                result = response.json()
+                outcome = "success"
+                return result
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception as exc:
+                latency("remote_error", stage=payload.get("stage"), current_phase=phase, error_type=type(exc).__name__, http_status=status)
+                raise
+            finally:
+                latency("remote_finished", stage=payload.get("stage"), current_phase=phase, outcome=outcome, http_status=status,
+                        phase_ms=round((time.monotonic()-phase_started)*1000, 3), total_ms=round((time.monotonic()-started)*1000, 3))
 
     async def _discover_worker(self) -> str:
         headers = {"Authorization": f"Bearer {self._settings.runpod_api_key}"}

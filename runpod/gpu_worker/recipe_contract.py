@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROMPT_VERSION = "recipe-grounded-v8"
+PROMPT_VERSION = "recipe-grounded-v9"
 Strategy = Literal["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"]
 
 
@@ -52,14 +52,36 @@ class ExtractedRecipe(WireModel):
     status: Literal["EXTRACTED", "INSUFFICIENT", "MIXED_BATCH"]
 
 
+TasteKind = Literal["SPICY", "SWEET", "SALTY", "MILD", "PEPPERY"]
+
+
+class TasteEvidence(WireModel):
+    field: Literal["TITLE", "INGREDIENT", "STEP"]
+    referenceNo: int = Field(ge=0, strict=True)
+    quote: str = Field(min_length=2, max_length=240)
+
+
+class TasteDimension(WireModel):
+    kind: TasteKind
+    status: Literal["SUPPORTED", "NOT_SUPPORTED", "UNKNOWN"]
+    evidence: list[TasteEvidence] = Field(max_length=4)
+    cookingEvidence: TasteEvidence | None = None
+    limitations: list[str] = Field(default_factory=list, max_length=8)
+
+
+class TasteProfile(WireModel):
+    # 맛 강도 / 확률 / 영양값을 생성하지 않는다. UNKNOWN은 평가 실패와 구분한다.
+    dimensions: list[TasteDimension] = Field(min_length=5, max_length=5)
+
+
 class RecipeAiRequest(WireModel):
-    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT"]
+    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT", "PROFILE"]
     # 값 내부도 FastAPI에서 만든 재고·원천 스냅샷이다. Worker는 도구 실행·DB 접근을 하지 않는다.
     context: dict
 
 
 class RecipeAiResponse(WireModel):
-    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT"]
-    result: PlanResult | SelectionResult | RankResult | ExtractedRecipe
+    stage: Literal["PLAN", "SELECT", "RANK", "EXTRACT", "PROFILE"]
+    result: PlanResult | SelectionResult | RankResult | ExtractedRecipe | TasteProfile
     model: str
     promptVersion: str = PROMPT_VERSION

@@ -7,8 +7,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from app.config import Settings
+from app.errors import DependencyUnavailable
+from app.logging.recipe_trace import recipe_trace
 from app.recipes.ai import RecipeReasoner
-from app.recipes.ai_contract import PROMPT_VERSION
+from app.recipes.ai_contract import PROMPT_VERSION, TasteProfile
 from app.recipes.candidate_pool import coverage_counts, representative_candidates
 from app.recipes.context import recommendation_context
 from app.recipes.diagnostics import candidate_diagnostics
@@ -26,6 +28,8 @@ from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationRes
 from app.recipes.selection import select_recommendations
 from app.recipes.stock_names import stock_ingredient
 from app.recipes.suitability import DEFAULT_PANTRY_NAMES, WATER_NAMES, assess_suitability, ingredient_role
+from app.recipes.taste_profiles import preference_decisions
+from app.recipes.taste_repository import TasteProfileRepository
 from app.recipes.web_provider import WebRecipeProvider
 
 logger = logging.getLogger(__name__)
@@ -41,11 +45,17 @@ class RecipeService:
         self._preference_decisions = PreferenceDecisionCache()
         self.repository = repository or RecipeRepository(settings)
         self.provider = provider or FoodSafetyProvider(settings)
+        self.taste_profiles = TasteProfileRepository(self.repository)
         self.web_provider = WebRecipeProvider(settings, reasoner=self.reasoner)
         self.cache = RecipeResultCache(settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
 
     # 재료 이름·제외 목록·날짜별 캐시를 검증하고 확정 재고 기반 추천을 반환한다.
     async def recommend(self, request: RecommendationRequest) -> RecommendationResponse:
+        with recipe_trace(request.requestId):
+            return await self._recommend(request)
+
+    # 기존 추천 처리와 캐시 경계를 유지한다.
+    async def _recommend(self, request: RecommendationRequest) -> RecommendationResponse:
         today = datetime.now(ZoneInfo("Asia/Seoul")).date()
         excluded = sorted({normalize(name) for name in request.excludedIngredientNames if normalize(name)})
         pantry = sorted({canonical(name) for name in [*DEFAULT_PANTRY_NAMES, *request.pantryIngredientNames]
@@ -126,7 +136,23 @@ class RecipeService:
                     usage["name"] = original_stock[usage["ingredientId"]]
                 data["_suitability"] = assess_suitability(data, original_names)
                 return data
+            # 전체 DB 후보의 원천 평가를 한 번에 조회한다. 프로필 부재는 요청별 평가로 보완하되 재료명만으로 확정하지 않는다.
+            async def attach_profiles(rows: list[dict]) -> None:
+                if not request.preferenceTags or not self.settings.recipe_ai_enabled or not self.settings.recipe_taste_profiles_enabled:
+                    return
+                try:
+                    async with asyncio.timeout(max(0.01, min(2, deadline - monotonic()))):
+                        profiles = await self.taste_profiles.load_many(rows, self.settings.ollama_model)
+                    for row in rows:
+                        profile = profiles.get((row["source"], row["sourceRecipeId"]))
+                        if profile is not None:
+                            row["tasteProfile"] = profile.model_dump(mode="json")
+                except (DependencyUnavailable, TimeoutError):
+                    ranker.warnings.append("TASTE_PROFILE_STORE_UNAVAILABLE")
+                    logger.warning("recipe_taste_profile_store_unavailable")
+
             ranked = [score_candidate(recipe) for recipe in candidates]
+            await attach_profiles(ranked)
             ranked.sort(key=lambda item: (-item["score"], item["source"], item["sourceRecipeId"]))
             baseline = build_baseline(ranked, matched_request)
             validation_ms = (monotonic() - validation_started) * 1000
@@ -156,6 +182,7 @@ class RecipeService:
                         merged[(recipe.source, recipe.sourceRecipeId)] = score_candidate(recipe)
                         added = True
                 ranked = list(merged.values())
+                await attach_profiles(ranked)
                 baseline = build_baseline(ranked, matched_request)
                 if supplied.food_safety_searched:
                     source += "_AND_FOOD_SAFETY_KOREA"
@@ -174,8 +201,7 @@ class RecipeService:
             ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
             can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags))
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
-            if selected is not None:
-                ranker.hydrate(context, baseline)
+            ranker.hydrate(context, baseline)
             # 같은 재료의 후보를 모두 정상 평가한 뒤에도 취향 일치가 없을 때만 웹 보충한다.
             supported = ranker.preference_matches
             valid_evaluated = ranker.evaluated_identities - ranker.rejected_preference_identities - set(ranker.rejected_preference_tags)
@@ -190,8 +216,7 @@ class RecipeService:
                 shortlist = preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)
                 ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
                 selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and deadline - monotonic() >= 1 else selected
-            if selected is not None:
-                ranker.hydrate(context, baseline)
+            ranker.hydrate(context, baseline)
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
             confirmations = confirmation_rows[:3]
             if confirmations:
@@ -202,18 +227,34 @@ class RecipeService:
                 ranker.warnings.append("MISSING_INGREDIENTS_REQUIRE_SHOPPING")
             if unresolved_count:
                 ranker.warnings.append("UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK")
+            if any(row.get("tasteProfile") for row in baseline):
+                ranker.warnings.append("TASTE_PROFILE_USED")
             evaluated = ranker.evaluated_identities
             for row in [*baseline, *confirmations]:
                 identity = (row["source"], row["sourceRecipeId"])
                 row["preferenceMatch"] = ("NOT_REQUESTED" if not request.preferenceTags else "MATCHED" if identity in ranker.preference_matches
                                           else "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities else "UNKNOWN")
-                tag_evidence = ranker.preference_tag_evidence.get(identity, {})
+                tag_evidence = dict(ranker.preference_tag_evidence.get(identity, {}))
+                profiled = preference_decisions(TasteProfile.model_validate(row["tasteProfile"]), request.preferenceTags) if row.get("tasteProfile") else {}
+                for tag, (status, quote) in profiled.items():
+                    tag_evidence.pop(tag, None)
+                    if status == "MATCHED" and quote:
+                        tag_evidence[tag] = quote
                 row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED" if tag in tag_evidence else
                                                   "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities
                                                   and tag not in ranker.rejected_preference_tags.get(identity, set()) else "UNKNOWN",
                                                   "evidence": tag_evidence.get(tag)} for tag in request.preferenceTags]
+                # 저장 프로필의 불확실성은 보존하고 태그별 상태를 우선한다.
+                for assessment in row["preferenceAssessments"]:
+                    status = profiled.get(assessment["tag"], (None, None))[0]
+                    if status is not None:
+                        assessment["status"] = status
+                        assessment["evidence"] = tag_evidence.get(assessment["tag"]) if status == "MATCHED" else None
+                if request.preferenceTags:
+                    statuses = [item["status"] for item in row["preferenceAssessments"]]
+                    row["preferenceMatch"] = "MATCHED" if "MATCHED" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "NOT_MATCHED"
                 if row["preferenceMatch"] == "MATCHED":
-                    row["preferenceEvidence"] = ranker.preference_evidence[identity]
+                    row["preferenceEvidence"] = next(iter(tag_evidence.values()))
                     row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
                 elif row["preferenceMatch"] == "NOT_MATCHED":
                     row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않아 취향 일치 후보보다 후순위입니다."
@@ -223,7 +264,7 @@ class RecipeService:
                 ranker.warnings.append("NO_VERIFIED_PREFERENCE_MATCH")
             if self.settings.recipe_ai_enabled and len(shortlist) == 1 and not request.preferenceTags:
                 ranker.warnings.append("AI_NOT_NEEDED_SINGLE_CANDIDATE")
-            engine = "AI" if selected is not None else "RULE_FALLBACK" if baseline else "EMPTY"
+            engine = "AI" if selected is not None or any(row.get("tasteProfile") for row in baseline) else "RULE_FALLBACK" if baseline else "EMPTY"
             if engine == "RULE_FALLBACK":
                 ranker.warnings.append("RULE_RESULTS_NOT_AI_JUDGEMENT")
             if ranked and not baseline:
@@ -268,6 +309,8 @@ class RecipeService:
             extraction_calls = sum(report.extraction_calls for report in web_reports)
             logger.info("recipe_recommendation_timing request_id=%s timings_ms=%s ai_input_bytes=%d ai_candidate_count=%d", request.requestId,
                         json.dumps(timings, separators=(",", ":")), ranker.input_bytes, ranker.candidate_count)
+            used_profiles = sum(row.get("tasteProfile") is not None for row in baseline)
+            evaluated_by_ai = bool(ranker.calls or extraction_calls or ranker.preference_cache_hits or used_profiles)
             return RecommendationResponse(recommendationId=f"rec_{uuid4().hex}", userId=request.userId, refrigeratorId=request.refrigeratorId,
                                           inventoryFingerprint=request.inventoryFingerprint, recommendationMode=request.recommendationMode,
                                           recommendations=[{key: value for key, value in row.items() if not key.startswith("_")} for row in result],
@@ -276,7 +319,8 @@ class RecipeService:
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           context=context["recommendationContext"],
-                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if ranker.calls or extraction_calls or ranker.preference_cache_hits else None,
+                                          trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
+                                                 "tasteProfileCount": used_profiles,
                                                  "preferenceDecisionCacheHits": ranker.preference_cache_hits,
                                                  "aiCalls": ranker.calls + extraction_calls, "searchCount": searches, "candidateCount": len(ranked),
                                                   "externalSearchCount": int(external_searched), "webSearchCount": web_searches,

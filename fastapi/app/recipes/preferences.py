@@ -4,6 +4,7 @@ from app.recipes.candidate_pool import representative_candidates
 from app.recipes.meal_quality import frying_steps, weak_spicy_basis
 from app.recipes.retrieval import canonical
 from app.recipes.suitability import ingredient_role
+from app.recipes.taste_profiles import TAG_KINDS
 
 SPICY_TAGS = {"매운거", "매운맛", "매운음식", "매콤한거", "칼칼한거", "칼칼한맛"}
 SPICY_EVIDENCE = ("고춧가루", "고추가루", "청양고추", "고추장", "매콤", "매운", "칠리", "마라", "고추기름")
@@ -24,6 +25,15 @@ def valid_preference_evidence(row: dict, quote: str, tags: list[str]) -> bool:
         return False
     if {canonical(tag) for tag in tags}.intersection({"담백한거", "담백한맛", "담백한음식"}) and frying_steps(row):
         return False
+    kinds = {TAG_KINDS.get(canonical(tag)) for tag in tags}
+    if kinds.intersection({"SWEET", "SALTY", "MILD", "PEPPERY"}):
+        # 조리 근거와 계량 정보가 없는 단일 재료명은 알려진 맛의 확정 근거로 사용하지 않는다.
+        if not any(text in canonical(step["instruction"]) for step in row["steps"]):
+            return False
+        explicit = any(word in text for word in ("담백", "달콤", "달달", "짭짤", "칼칼"))
+        complete = row.get("baseServings") is not None and all(item.get("amountValue") is not None for item in row["ingredients"])
+        if not explicit and not complete:
+            return False
     return True
 
 
@@ -36,7 +46,7 @@ def explicit_preference_signal(row: dict, tags: list[str]) -> bool:
 
 # 검색에 쓰는 동의 표현만 정리한다. 원래 사용자 태그는 모델 판단과 응답에 그대로 유지한다.
 def search_preference_terms(tags: list[str]) -> list[str]:
-    return list(dict.fromkeys("매운거" if canonical(tag) in SPICY_TAGS else tag for tag in tags))
+    return list(dict.fromkeys("칼칼한맛" if canonical(tag) in {"칼칼한거", "칼칼한맛"} else "매운거" if canonical(tag) in SPICY_TAGS else tag for tag in tags))
 
 
 # 전체 취향 후보 하나로 검색을 끝내지 않고, 날짜순 임박 식재료마다 주재료 활용/취향 근거를 확인한다.
