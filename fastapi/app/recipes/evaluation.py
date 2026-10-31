@@ -1,9 +1,15 @@
 """같은 후보의 기본·AI 순서를 사실 지표로 비교한다. 취향·맛·안전성 점수는 생성하지 않는다."""
 
+from app.recipes.selection import verified_consumption
+
 
 # 반환 상위 목록의 주재료 확인 부담·추가 구매·분량 충족·임박 활용을 집계한다.
 def recommendation_metrics(rows: list[dict]) -> dict:
-    return {"returned": len(rows), "quantityVerified": sum(row["feasibility"] == "QUANTITY_VERIFIED" for row in rows),
+    return {"returned": len(rows),
+            "preferenceMatched": sum(row.get("preferenceMatch") == "MATCHED" for row in rows),
+            "usesExpiringMainIngredients": len({name for row in rows for name in row.get("usesExpiringMainIngredients", [])}),
+            "verifiedUrgentConsumptionRecipes": sum(verified_consumption(row) is not None for row in rows),
+            "quantityVerified": sum(row["feasibility"] == "QUANTITY_VERIFIED" for row in rows),
             "needsShopping": sum(row["feasibility"] == "NEEDS_SHOPPING" for row in rows),
             "missingMainIngredients": sum(len(row["missingEssentialIngredientNos"]) for row in rows),
             "missingIngredients": sum(len(row["missingIngredients"]) for row in rows),

@@ -77,7 +77,7 @@ class RecipeResultCache:
         failed_rank = {"AI_UNAVAILABLE_OR_INVALID", "AI_CIRCUIT_OPEN", "AI_PREFERENCE_EVIDENCE_REJECTED"}.intersection(result.warnings)
         failed_fallback = result.recommendationEngine != "AI" and {"EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE",
                                                                   "RECIPE_SUPPLY_BUDGET_EXHAUSTED"}.intersection(result.warnings)
-        if result.recommendations and not failed_rank and not failed_fallback:
+        if (result.recommendations or result.confirmationCandidates) and not failed_rank and not failed_fallback:
             self.entries[key] = (monotonic() + self.ttl, result.model_copy(deep=True))
             self.entries.move_to_end(key)
             while len(self.entries) > self.max_size:

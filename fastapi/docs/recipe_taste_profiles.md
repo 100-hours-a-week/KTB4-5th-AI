@@ -1,6 +1,6 @@
 # 레시피 원문 기반 맛 특성
 
-정책 `recipe-rerank-v19`, Worker 계약 `recipe-grounded-v10`, 원천 평가 `recipe-taste-v1`이다. 기존 Gemma를 사용하며 모델 교체 / 가중치 학습은 하지 않는다. 사진 분석과 개인 피드백 보정은 변경하지 않는다.
+정책 `recipe-rerank-v20`, Worker 계약 `recipe-grounded-v10`, 원천 평가 `recipe-taste-v1`이다. 기존 Gemma를 사용하며 모델 교체 / 가중치 학습은 하지 않는다. 사진 분석과 개인 피드백 보정은 변경하지 않는다.
 
 ## 구조와 적용 범위
 

@@ -25,7 +25,7 @@ from app.recipes.repository import RecipeRepository
 from app.recipes.result_cache import RecipeResultCache, recommendation_key
 from app.recipes.retrieval import allowed, canonical, is_excluded, missing_named_ingredients, query_variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
-from app.recipes.selection import select_recommendations
+from app.recipes.selection import candidate_priority, preference_candidates, select_recommendations
 from app.recipes.stock_names import stock_ingredient
 from app.recipes.suitability import DEFAULT_PANTRY_NAMES, WATER_NAMES, assess_suitability, ingredient_role
 from app.recipes.taste_profiles import preference_decisions
@@ -260,7 +260,7 @@ class RecipeService:
                     row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않아 취향 일치 후보보다 후순위입니다."
             if request.preferenceTags and len(baseline) > len(evaluated):
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
-            if request.preferenceTags and not ranker.preference_matches:
+            if request.preferenceTags and not any(row.get("preferenceMatch") == "MATCHED" for row in baseline):
                 ranker.warnings.append("NO_VERIFIED_PREFERENCE_MATCH")
             if self.settings.recipe_ai_enabled and len(shortlist) == 1 and not request.preferenceTags:
                 ranker.warnings.append("AI_NOT_NEEDED_SINGLE_CANDIDATE")
@@ -275,7 +275,32 @@ class RecipeService:
                 ranker.warnings.append("EXPIRED_INVENTORY_INCLUDED_NOT_SAFETY_APPROVAL")
             # 최종 순위는 현재 원천 / 판정 스냅샷만으로 한 번 선정한다. 오래된 모델 순열의 행 참조를 재사용하지 않는다.
             ordered = baseline
-            result = select_recommendations(ordered, matched_request, context["recommendationContext"]["variationSeed"])
+            for row in ordered:
+                row["_urgentInventoryIds"] = context["expiryPolicy"]["expiringIngredientIds"]
+                row["_urgentInventoryNames"] = {item.ingredientId: item.name for item in inventory}
+            eligible, uncertain = preference_candidates(ordered, matched_request)
+            if request.preferenceTags:
+                if len(eligible) < request.limit:
+                    ranker.warnings.append("PREFERENCE_MATCH_COUNT_BELOW_LIMIT")
+                # 적합성 확인과 취향 미확인을 같은 필드에 담되 사유로 구분하며, 추천과 중복하지 않는다.
+                seen = {(row["source"], row["sourceRecipeId"]) for row in eligible}
+                candidates = []
+                for original in [*sorted(uncertain, key=candidate_priority), *confirmations]:
+                    identity = (original["source"], original["sourceRecipeId"])
+                    if identity in seen or original.get("preferenceMatch") == "NOT_MATCHED":
+                        continue
+                    seen.add(identity)
+                    row = dict(original)
+                    if row.get("preferenceMatch") == "UNKNOWN":
+                        row["confirmationReasons"] = [*row.get("confirmationReasons", []), "요청 취향의 일치 여부가 미확인입니다."]
+                        row["reason"] += " 취향 미확인으로 정식 추천과 분리한 확인 후보입니다."
+                    candidates.append(row)
+                confirmations = candidates[:3]
+                if confirmations:
+                    ranker.warnings.append("PREFERENCE_UNVERIFIED_CANDIDATES_SEPARATED")
+            result = select_recommendations(eligible, matched_request, context["recommendationContext"]["variationSeed"])
+            if len(result) < request.limit:
+                ranker.warnings.append("CANDIDATE_COUNT_BELOW_REQUEST_LIMIT")
             if any(row["missingIngredients"] for row in result):
                 ranker.warnings.append("SHOPPING_COST_UNVERIFIED")
             if any(row["baseServings"] is None for row in result):

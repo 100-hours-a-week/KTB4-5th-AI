@@ -26,7 +26,7 @@ from app.recipes.taste_profiles import preference_decisions, uncertain_unmatched
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v19"
+POLICY_VERSION = "recipe-rerank-v20"
 
 
 # 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
@@ -314,7 +314,7 @@ class MealRanker:
 
 
 # 사전 후보 정렬과 최종 선정이 같은 정적 우선순위를 사용하도록 위임한다.
-def eligibility_tier(row: dict) -> tuple[int, ...]:
+def eligibility_tier(row: dict) -> tuple[int | float, ...]:
     return candidate_priority(row)
 
 
