@@ -62,6 +62,8 @@ class AnalysisRuntime:
         self.active_analysis_ids: set[str] = set()
         self.queued_at: dict[str, datetime] = {}
         self.accepting = False
+        self.completion_waiters: dict[str, set[asyncio.Future[AnalysisView]]] = {}
+        self.kafka_analysis_ids: set[str] = set()
 
     # 하위 호환용 — 여러 컨슈머 중 하나(또는 없으면 None)를 반환한다. 전체 목록은
     # active_analysis_ids를 본다.
@@ -92,6 +94,9 @@ class AnalysisRuntime:
             self.queue.qsize(),
         )
         self.accepting = False
+        for waiters in self.completion_waiters.values():
+            for waiter in waiters:
+                waiter.cancel()
         tasks = [*self.consumer_tasks, self.janitor_task]
         for task in tasks:
             if task:
@@ -109,7 +114,7 @@ class AnalysisRuntime:
         logger.info("runtime.stopped")
 
     # 검증된 분석 요청을 받아 멱등 레코드를 만들고 큐 접수 결과를 반환한다.
-    def submit(self, request: AnalysisCreateRequest) -> AnalysisAccepted:
+    def submit(self, request: AnalysisCreateRequest, *, kafka_delivery: bool = False) -> AnalysisAccepted:
         if not self.accepting:
             raise ModelUnavailable("분석 런타임이 요청을 받지 않는 상태입니다.")
         analysis_id = f"ana_{secrets.token_hex(12)}"
@@ -142,7 +147,25 @@ class AnalysisRuntime:
                 request.request_id,
                 record.status,
             )
+        if kafka_delivery and record.completed_at is None:
+            self.kafka_analysis_ids.add(record.analysis_id)
         return self.store.accepted(record)
+
+    # 접수가 아닌 terminal 결과를 기다린다. 대기 취소는 기존 분석 큐의 실행을 취소하지 않는다.
+    async def submit_and_wait(self, request: AnalysisCreateRequest) -> AnalysisView:
+        accepted = self.submit(request, kafka_delivery=True)
+        view = self.store.get_view(accepted.analysis_id)
+        if view.completed_at is not None and accepted.analysis_id not in self.kafka_analysis_ids:
+            return view
+        waiter: asyncio.Future[AnalysisView] = asyncio.get_running_loop().create_future()
+        waiters = self.completion_waiters.setdefault(accepted.analysis_id, set())
+        waiters.add(waiter)
+        try:
+            return await waiter
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                self.completion_waiters.pop(accepted.analysis_id, None)
 
     # 파이프라인의 OCR과 LLM 상태를 점검해 모델별 준비 여부를 반환한다.
     async def models_ready(self) -> dict[str, bool]:
@@ -223,6 +246,13 @@ class AnalysisRuntime:
                     await self.history.save_analysis(self.store.get_record(analysis_id))
                 except Exception:
                     logger.exception("analysis.persist.failed analysis_id=%s", analysis_id)
+
+            if view.completed_at is not None and analysis_id in self.kafka_analysis_ids:
+                self.kafka_analysis_ids.discard(analysis_id)
+                for waiter in self.completion_waiters.pop(analysis_id, set()):
+                    if not waiter.done():
+                        waiter.set_result(view)
+                continue
 
             if view.completed_at is not None:
                 # 콜백 변환·전송 오류가 소비자 코루틴까지 끝내면 이후 큐 작업이 영원히 처리되지 않는다.

@@ -9,6 +9,7 @@ description = "영수증·실물 이미지 분석 요청을 GPU Worker에 위임
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "aiokafka>=0.14,<0.16",
   "asyncpg>=0.29,<1",
   "boto3>=1.35,<2",
   "fastapi>=0.115,<1",

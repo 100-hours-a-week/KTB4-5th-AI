@@ -422,6 +422,7 @@ class FeedbackConfirmedItem(BaseModel):
     weight_value: float | None = Field(default=None, alias="weightValue")
     weight_unit: Literal["G", "ML", "NONE"] = Field(default="NONE", alias="weightUnit")
     expiration_date: Date | None = Field(default=None, alias="expirationDate")
+    expiration_source: Literal["USER_CONFIRMED"] = Field(default="USER_CONFIRMED", alias="expirationSource")
 
     model_config = ConfigDict(populate_by_name=True)
 
