@@ -33,7 +33,8 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
                 amount = min(required - allocated, remaining[item.ingredientId])
                 remaining[item.ingredientId] -= amount
                 allocated += amount
-                if amount > 0:
+                # 앞선 재료 줄이 재고를 모두 쓴 경우에도 레시피 재료와 재고의 연결은 남긴다.
+                if amount > 0 or allocated < required:
                     allocations[item.ingredientId].append({"ingredientNo": ingredient.ingredientNo, "usedAmount": float(amount)})
             row.update(allocatedAmount=float(allocated), shortageAmount=float(required - allocated))
             row["status"] = "SUFFICIENT" if allocated >= required else "SHORTAGE"
@@ -44,6 +45,9 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
             row.update(status="PANTRY_UNVERIFIED", allocatedAmount=None, shortageAmount=None)
         if row["status"] in {"UNKNOWN_AMOUNT", "UNIT_MISMATCH"}:
             unresolved.update(item.ingredientId for item in matched)
+            # 양을 계산하지 못해도 보유 사실은 전달한다. usedAmount=0은 실제 사용량이 아니며 상태는 UNRESOLVED다.
+            for item in matched:
+                allocations[item.ingredientId].append({"ingredientNo": ingredient.ingredientNo, "usedAmount": 0.0})
         rows.append(row)
     # 양념/물의 보유량 미확인은 식재료 분량 판정을 막지 않으며 개별 원문 상태는 보존한다.
     food_rows = [row for row in rows if row["status"] != "PANTRY_UNVERIFIED"]

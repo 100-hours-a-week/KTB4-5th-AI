@@ -69,7 +69,7 @@ preferenceMatch는 AI 판단 MATCHED, 평가했지만 적합 근거가 없는 NO
 
 MATCHED에는 preferenceEvidence로 원문 인용을 함께 제공한다. 인용이 원문에 없거나 알려진 취향 조건과 모순되면 UNKNOWN으로 처리한다. AI_INPUT_WINDOW_REDUCED는 입력 크기로 AI 평가 범위만 줄였다는 뜻이며 최종 원문/후보를 삭제했다는 뜻은 아니다. trace.aiInputBytes/aiCandidateCount/timingsMs로 마지막 AI 입력과 추천 생성 단계 시간을 확인한다. 큐 대기/콜백 시간은 job의 시각과 로그로 별도 확인한다.
 
-웹 보충의 trace.webDiscoveredCount는 받은 검색 결과 수, webExtractionCalls는 규칙 실패 후 Gemma EXTRACT 시도 수, webParseFailureCounts는 최종 추출 실패 사유별 건수다. timingsMs.webExtractionMs는 해당 모델 호출 대기 포함 시간이다. aiCalls는 RANK와 EXTRACT 시도의 합계이며 recommendationEngine=AI는 최종 RANK 성공을 뜻한다. 추출만 AI를 사용하고 최종 정렬이 폴백인 경우 RULE_FALLBACK일 수 있다. 기존 요청 필드와 레시피 콜백 경로는 유지한다.
+추천 후보가 이미 있으면 보충을 기다리지 않고 응답한다. `warnings`의 `RECIPE_SUPPLY_DEFERRED`는 보충이 백그라운드에서 진행 중이며 다음 요청부터 반영된다는 뜻이고, 이번 응답의 웹 관련 trace 값에는 포함되지 않는다. 웹 보충의 trace.webDiscoveredCount는 받은 검색 결과 수, webExtractionCalls는 규칙 실패 후 Gemma EXTRACT 시도 수, webParseFailureCounts는 최종 추출 실패 사유별 건수다. timingsMs.webExtractionMs는 해당 모델 호출 대기 포함 시간이다. aiCalls는 RANK와 EXTRACT 시도의 합계이며 recommendationEngine=AI는 최종 RANK 성공을 뜻한다. 추출만 AI를 사용하고 최종 정렬이 폴백인 경우 RULE_FALLBACK일 수 있다. 기존 요청 필드와 레시피 콜백 경로는 유지한다.
 
 v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모리의 검색/검증된 본문 재사용 횟수다. 캐시 재사용 시 webSearchCount 또는 webExtractionCalls가 0이어도 웹 추천이 포함될 수 있다. 취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
 
@@ -82,7 +82,7 @@ v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모
 ]
 ```
 
-이것은 실제 추천 요리/원문 분량을 제시한 예시가 아니라 ID별 배분 형식 예시다. 원문 분량이 있어야만 계산한다. CALCULATED는 해당 배분량 계산 가능, UNRESOLVED는 분량/단위 미확정, UNUSED는 계산된 사용량이 없다는 뜻이다. UNRESOLVED의 usedAmount=0을 실제로 필요 없다는 뜻으로 해석하지 않는다. 단위 환산이 불가능하면 임의로 개수/G를 바꾸지 않는다.
+이것은 실제 추천 요리/원문 분량을 제시한 예시가 아니라 ID별 배분 형식 예시다. 원문 분량이 있어야만 계산한다. CALCULATED는 해당 배분량 계산 가능, UNRESOLVED는 분량/단위 미확정, UNUSED는 계산된 사용량이 없다는 뜻이다. UNRESOLVED의 usedAmount=0을 실제로 필요 없다는 뜻으로 해석하지 않는다. 재고와 이름이 같지만 양을 계산하지 못한 재료도 allocations에 ingredientNo와 usedAmount=0으로 연결하므로, 백엔드는 이 연결로 보유 여부를 판단하고 차감량은 CALCULATED만 사용한다. 단위 환산이 불가능하면 임의로 개수/G를 바꾸지 않는다.
 
 사용자는 하나의 레시피를 선택한다. 10개의 사용량을 합산해 차감하면 안 된다. 백엔드는 선택 시 재고 fingerprint와 최신 수량을 확인하고 원자적으로 차감한다. AI 서버는 가상 배분만 반환한다.
 

@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: float = Field(default=120.0, gt=0)
     ollama_temperature: float = Field(default=0.0, ge=0, le=2)
     ollama_num_predict: int = Field(default=512, ge=32, le=2048)
-    ollama_keep_alive: str = "30m"
+    ollama_keep_alive: str = "12h"
     # 같은 모델의 워밍업 / 사진 / 레시피가 다른 context로 실행기를 재생성하지 않게 한다.
     ollama_num_ctx: int = Field(default=32768, ge=8192, le=32768)
 

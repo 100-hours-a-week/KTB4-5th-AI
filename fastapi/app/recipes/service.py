@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
 from uuid import uuid4
@@ -33,6 +34,8 @@ from app.recipes.taste_repository import TasteProfileRepository
 from app.recipes.web_provider import WebRecipeProvider
 
 logger = logging.getLogger(__name__)
+DEFERRED_RECIPE_TTL_SECONDS = 3600
+DEFERRED_RECIPE_MAX_ENTRIES = 200
 
 
 class RecipeService:
@@ -48,6 +51,40 @@ class RecipeService:
         self.taste_profiles = TasteProfileRepository(self.repository)
         self.web_provider = WebRecipeProvider(settings, reasoner=self.reasoner)
         self.cache = RecipeResultCache(settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
+        self._deferred_supply: set[asyncio.Task] = set()
+        self._deferred_recipes: dict[tuple[str, str], tuple[float, Recipe]] = {}
+
+    # 후보가 이미 있는 요청은 보충을 기다리지 않는다. GPU 경합을 막기 위해 한 번에 하나만 실행하고 나머지는 다음 요청에 맡긴다.
+    def _defer_supply(self, focus: list[str], companions: list[str], tags: list[str], allow_food_safety: bool, usable: Callable[[Recipe], bool]) -> bool:
+        if self._deferred_supply:
+            return False
+        task = asyncio.create_task(self._run_deferred_supply(focus, companions, tags, allow_food_safety, usable))
+        self._deferred_supply.add(task)
+        task.add_done_callback(self._deferred_supply.discard)
+        return True
+
+    # 결과는 다음 요청의 후보로 쓴다. DB 저장이 승인되지 않은 웹 원천도 제한 시간 동안 메모리에서 재사용한다.
+    async def _run_deferred_supply(self, focus: list[str], companions: list[str], tags: list[str], allow_food_safety: bool, usable: Callable[[Recipe], bool]) -> None:
+        try:
+            supplied = await RecipeSupply(self.settings, self.repository, self.provider, self.web_provider).replenish(
+                focus, companions, tags, monotonic() + self.settings.recipe_supply_background_timeout_seconds, allow_food_safety, usable=usable)
+            expires = monotonic() + DEFERRED_RECIPE_TTL_SECONDS
+            for recipe in supplied.recipes:
+                self._deferred_recipes.pop((recipe.source, recipe.sourceRecipeId), None)
+                self._deferred_recipes[(recipe.source, recipe.sourceRecipeId)] = (expires, recipe)
+            while len(self._deferred_recipes) > DEFERRED_RECIPE_MAX_ENTRIES:
+                self._deferred_recipes.pop(next(iter(self._deferred_recipes)))
+            logger.info("recipe_supply_deferred_finished recipe_count=%d warnings=%s", len(supplied.recipes), supplied.warnings)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("recipe_supply_deferred_failed error_type=%s", type(exc).__name__)
+
+    # 만료된 항목을 정리하고 아직 유효한 보충 레시피를 반환한다.
+    def _deferred_candidates(self) -> list[Recipe]:
+        now = monotonic()
+        self._deferred_recipes = {key: value for key, value in self._deferred_recipes.items() if value[0] > now}
+        return [recipe for _, recipe in self._deferred_recipes.values()]
 
     # 재료 이름·제외 목록·날짜별 캐시를 검증하고 확정 재고 기반 추천을 반환한다.
     async def recommend(self, request: RecommendationRequest) -> RecommendationResponse:
@@ -103,7 +140,8 @@ class RecipeService:
             found = await self.repository.find(query_names) if names else []
             database_ms = (monotonic() - lookup_started) * 1000
             validation_started = monotonic()
-            candidates = [recipe for recipe in found if usable(recipe)]
+            # 같은 레시피는 DB 값이 우선하도록 보충 결과를 먼저 둔다.
+            candidates = [recipe for recipe in [*self._deferred_candidates(), *found] if usable(recipe)]
             searches = 1 if names else 0
             candidates = list({(r.source, r.sourceRecipeId): r for r in candidates}.values())
             search_names = list(dict.fromkeys(item.name for item in sorted(inventory, key=lambda item: (item.expirationDate, item.ingredientId))))
@@ -192,8 +230,11 @@ class RecipeService:
 
             # 미평가를 부재로 취급하지 않는다. 원천 자체에 후보가 없는 임박 재료만 우선 보충한다.
             focus = uncovered(baseline) if "USE_EXPIRING" in request.strategies else []
-            if names and (not baseline or focus):
+            # 보여줄 후보가 없을 때만 기다린다. 후보가 있으면 바로 응답하고 보충은 다음 요청에 반영한다.
+            if names and not baseline:
                 await supplement(focus or search_names[:2])
+            elif names and focus and self._defer_supply(focus, search_names, request.preferenceTags, True, usable):
+                ranker.warnings.append("RECIPE_SUPPLY_DEFERRED")
             shortlist = preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)
             if not request.preferenceTags:
                 baseline = vary_baseline(baseline, context["recommendationContext"]["variationSeed"])
@@ -212,11 +253,8 @@ class RecipeService:
                             if canonical(name) in {canonical(value) for value in row["usesExpiringMainIngredients"]}}
                 if relevant and relevant <= valid_evaluated:
                     proven_focus.append(name)
-            if request.preferenceTags and proven_focus and await supplement(proven_focus, allow_food_safety=False):
-                shortlist = preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)
-                ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
-                selected = await ranker.rank(context, shortlist) if self.settings.recipe_ai_enabled and deadline - monotonic() >= 1 else selected
-            ranker.hydrate(context, baseline)
+            if request.preferenceTags and proven_focus and not supply_used and self._defer_supply(proven_focus, search_names, request.preferenceTags, False, usable):
+                ranker.warnings.append("RECIPE_SUPPLY_DEFERRED")
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
             confirmations = confirmation_rows[:3]
             if confirmations:
@@ -375,5 +413,8 @@ class RecipeService:
 
     # 앱 종료 시 레시피 전용 DB pool을 해제한다.
     async def close(self) -> None:
+        for task in list(self._deferred_supply):
+            task.cancel()
+        await asyncio.gather(*self._deferred_supply, return_exceptions=True)
         await self.repository.close()
         await self.reasoner.close()

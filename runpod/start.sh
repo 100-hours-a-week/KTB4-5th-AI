@@ -208,7 +208,7 @@ payload = json.dumps(
         "think": False,
         "options": {"num_ctx": int(os.environ["OLLAMA_NUM_CTX"]), "num_predict": 1, "temperature": 0},
         "stream": False,
-        "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
+        "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "12h"),
     }
 ).encode("utf-8")
 request = urllib.request.Request(
