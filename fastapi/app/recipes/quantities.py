@@ -21,8 +21,8 @@ def assess_quantities(recipe: Recipe, inventory: list[InventoryItem], servings: 
     for ingredient in recipe.ingredients:
         matched = sorted([item for item in inventory if canonical(item.name) == canonical(ingredient.name)], key=lambda item: (item.expirationDate, item.ingredientId))
         required = None
-        if recipe.baseServings is not None and ingredient.amountValue is not None:
-            required = Decimal(str(ingredient.amountValue)) * Decimal(servings) / Decimal(str(recipe.baseServings))
+        if ingredient.amountValue is not None:
+            required = Decimal(str(ingredient.amountValue)) * Decimal(servings) / Decimal(str(recipe.baseServings if recipe.baseServings is not None else 1))
         row = {"ingredientNo": ingredient.ingredientNo, "name": ingredient.name, "amountText": ingredient.amountText,
                "requiredAmount": float(required) if required is not None else None, "unit": ingredient.unit,
                "allocatedAmount": None, "shortageAmount": None, "status": "UNKNOWN_AMOUNT"}

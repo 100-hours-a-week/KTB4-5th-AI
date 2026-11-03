@@ -305,6 +305,7 @@ class RecipeService:
                 ranker.warnings.append("SHOPPING_COST_UNVERIFIED")
             if any(row["baseServings"] is None for row in result):
                 ranker.warnings.append("SOURCE_SERVINGS_UNAVAILABLE")
+                ranker.warnings.append("SOURCE_SERVINGS_ASSUMED_ONE")
             if any(usage["allocationStatus"] == "UNRESOLVED" for row in result for usage in row["inventoryUsage"]):
                 ranker.warnings.append("SOURCE_QUANTITIES_UNRESOLVED")
             # 외부 검색용 전체 후보 판정과 달리 응답은 최종 반환한 목록의 활용만 보고한다.

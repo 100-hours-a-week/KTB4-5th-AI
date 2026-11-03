@@ -131,6 +131,8 @@ class RecipeSnapshot(Contract):
     name: Text
     imageUrl: str | None = None
     sourceUrl: str | None = Field(default=None, max_length=4096, pattern=r"^https?://")
+    sourceAttribution: str | None = Field(default=None, max_length=4096)
+    cookingNotes: list[str] = Field(default_factory=list, max_length=100)
     baseServings: float | None = Field(default=None, gt=0)
     ingredients: list[Ingredient] = Field(min_length=1, max_length=200)
     steps: list[Step] = Field(min_length=1, max_length=100)

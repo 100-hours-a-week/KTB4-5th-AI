@@ -7,6 +7,7 @@ from app.adapters._cache import LazyPool
 from app.config import Settings
 from app.errors import DependencyUnavailable, InvalidRequest
 from app.recipes.schemas import ChangesResponse, Recipe, normalize
+from app.recipes.source_cleanup import clean_precision_recipe
 
 
 class RecipeRepository:
@@ -26,7 +27,7 @@ class RecipeRepository:
         try:
             pool = await self.pool.get()
             rows = await pool.fetch("SELECT snapshot FROM recipe_ai.recipes WHERE status='ACTIVE' AND ingredient_names && $1::text[]", names)
-            return [Recipe.model_validate_json(row["snapshot"]) for row in rows]
+            return [clean_precision_recipe(Recipe.model_validate_json(row["snapshot"])) for row in rows]
         except DependencyUnavailable:
             raise
         except (asyncpg.PostgresError, OSError, TimeoutError, ValueError) as exc:
@@ -34,6 +35,7 @@ class RecipeRepository:
 
     # 검증된 원본과 출처를 원자적으로 저장한다. 전역 쓰기 락으로 cursor와 commit 순서를 일치시킨다.
     async def save(self, recipe: Recipe, raw: dict, policy: str) -> None:
+        recipe = clean_precision_recipe(recipe)
         try:
             pool = await self.pool.get()
             async with pool.acquire() as connection, connection.transaction():
@@ -80,7 +82,7 @@ class RecipeRepository:
             page = rows[:limit]
             last = page[-1]["change_id"] if page else after
             token = base64.urlsafe_b64encode(json.dumps({"v": 1, "after": last}, separators=(",", ":")).encode()).decode()
-            return ChangesResponse(items=[Recipe.model_validate_json(row["snapshot"]) for row in page], nextCursor=token, hasMore=len(rows) > limit)
+            return ChangesResponse(items=[clean_precision_recipe(Recipe.model_validate_json(row["snapshot"])) for row in page], nextCursor=token, hasMore=len(rows) > limit)
         except (asyncpg.PostgresError, OSError, TimeoutError, ValueError) as exc:
             raise DependencyUnavailable("레시피 변경 이력 조회에 실패했습니다.") from exc
 

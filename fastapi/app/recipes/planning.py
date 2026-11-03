@@ -26,7 +26,7 @@ from app.recipes.taste_profiles import preference_decisions, uncertain_unmatched
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v20"
+POLICY_VERSION = "recipe-rerank-v21"
 
 
 # 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
@@ -356,7 +356,7 @@ def build_baseline(ranked: list[dict], request: RecommendationRequest, confirmat
         if confirmation_only:
             row["feasibility"] = "NEEDS_CHECK"
         if row.get("baseServings") is None:
-            row["confirmationReasons"].append("원문 인분이 없어 요청 인분의 필요량을 확정할 수 없습니다.")
+            row["confirmationReasons"].append("원문 기준 인분이 없어 1인분으로 가정해 요청 인분의 필요량을 계산했습니다.")
         if len(row["missingIngredients"]) > 5:
             row["confirmationReasons"].append("추가 식재료가 5종을 초과합니다. 구매 예산 목표는 2만원이나 가격 정보가 없어 충족 여부는 확인이 필요합니다.")
         if weak_spicy_basis(row):
