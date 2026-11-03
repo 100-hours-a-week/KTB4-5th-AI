@@ -1,4 +1,4 @@
-"""기존 정밀레시피 안내문 분리. 기본 dry-run, 배포 후 --apply로 변경 이력까지 반영."""
+"""기존 정밀레시피 안내문 분리. 기본 dry-run, 배포 후 --apply로 변경 이력까지 반영. 실행 예: python -m app.recipes.repair_hansik_steps"""
 
 import argparse
 import asyncio

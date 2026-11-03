@@ -12,7 +12,7 @@ from app.recipes.taste_repository import TasteProfileRepository
 
 
 # 원천 ID로 페이지를 진행한다. 기존 평가를 재사용하고 오류는 집계하며 운영 추천 큐는 변경하지 않는다.
-async def backfill(limit: int, after_id: int, timeout: float) -> dict:
+async def backfill(limit: int, after_id: int, timeout: float, source: str | None = None) -> dict:
     settings = Settings()
     repository, reasoner = RecipeRepository(settings), RecipeReasoner(settings)
     store = TasteProfileRepository(repository)
@@ -21,7 +21,7 @@ async def backfill(limit: int, after_id: int, timeout: float) -> dict:
         pool = await repository.pool.get()
         if not await pool.fetchval("SELECT to_regclass('recipe_ai.taste_profiles') IS NOT NULL"):
             raise SystemExit("DB 소유자 권한으로 023 마이그레이션을 먼저 적용하세요.")
-        rows = await pool.fetch("SELECT id,snapshot FROM recipe_ai.recipes WHERE status='ACTIVE' AND id>$1 ORDER BY id LIMIT $2", after_id, limit)
+        rows = await pool.fetch("SELECT id,snapshot FROM recipe_ai.recipes WHERE status='ACTIVE' AND id>$1 AND ($3::text IS NULL OR source=$3) ORDER BY id LIMIT $2", after_id, limit, source)
         for record in rows:
             counts["scanned"] += 1
             counts["nextAfterId"] = record["id"]
@@ -56,10 +56,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--after-id", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=35)
+    parser.add_argument("--source", help="지정한 원천만 평가한다. 예: HANSIK_PRECISION")
     args = parser.parse_args()
     if not 1 <= args.limit <= 1000 or args.after_id < 0 or not 1 <= args.timeout <= 60:
         parser.error("limit=1~1000, after-id>=0, timeout=1~60 범위가 필요합니다.")
-    result = asyncio.run(backfill(args.limit, args.after_id, args.timeout))
+    result = asyncio.run(backfill(args.limit, args.after_id, args.timeout, args.source))
     print(json.dumps(result))
     if result["failed"]:
         raise SystemExit(1)

@@ -143,6 +143,14 @@ FastAPI / Worker를 함께 배포하고 먼저 DB 소유자 권한으로 023_rec
 
 `HANSIK_PRECISION`의 출처와 공통 인덕션 용어 안내를 `steps`에서 분리한다. `sourceAttribution`(nullable string)에 출처 / 공공누리 표시를 보존하고 `cookingNotes`(string array, 기본 빈 배열)에 공통 안내를 보존한다. `sourceUrl`도 반환한다. 실제 `[준비하기]` / `[조리하기]` / `[담기]` 본문과 단계별 인덕션 강도는 유지한다. 백엔드는 두 메타 필드를 조리 단계와 별도로 저장 / 표시해야 한다.
 
-조회 / 동기화 응답과 신규 저장은 같은 정리 함수를 사용한다. 기존 cursor를 이미 소비한 백엔드에 갱신을 전달하려면, **새 스키마가 포함된 FastAPI 배포 후** `python -m ops.repair_hansik_steps`로 dry-run하고 `python -m ops.repair_hansik_steps --apply --backup results/hansik-before.jsonl`을 실행한다. 원문 `raw_source`를 유지하고, 변경된 revision과 changes 이력을 추가한다. 구버전 FastAPI가 새 필드를 거부하므로 배포 전에 DB를 선반영하지 않는다.
+조회 / 동기화 응답과 신규 저장은 같은 정리 함수를 사용한다. 기존 cursor를 이미 소비한 백엔드에 갱신을 전달하려면 **새 스키마가 포함된 FastAPI 배포 후** 컨테이너에서 아래 순서로 실행한다. 원문 `raw_source`를 유지하고, 변경된 revision과 changes 이력을 추가한다. 구버전 FastAPI가 새 필드를 거부하므로 배포 전에 DB를 선반영하지 않는다.
+
+```bash
+python -m app.recipes.repair_hansik_steps
+python -m app.recipes.repair_hansik_steps --apply --backup /tmp/hansik-before.jsonl
+python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --after-id 0
+```
+
+백업 파일은 컨테이너와 함께 사라지므로 작업 종료 전에 옮긴다. revision이 바뀌면 저장된 맛 평가 키가 맞지 않아 취향 요청에서 해당 레시피가 미확인이 될 수 있다. 백필은 DB 원문을 기준으로 저장하므로 반드시 `--apply` 뒤에 실행하고 Worker가 켜져 있어야 한다. 출력의 `scanned`가 `--limit`과 같으면 `nextAfterId`를 `--after-id`로 넘겨 이어서 실행한다. 임베딩은 추천 API에 연결되지 않은 비교 실험용(`recipe_vector_experiment.md`)이고 제목 / 재료명만 사용하므로 재생성하지 않는다.
 
 재료 이름 매칭과 수량 배분은 다르다. 이름 / G 단위가 맞아도 기존 정책에서 기준 인분이 없으면 `inventoryUsage`는 UNRESOLVED였다. 1인분 가정 정책은 이 경우의 배분을 보완한다. 재료 수치 자체가 없거나 단위가 다르면 여전히 수동 확인이 필요하다. 다진 당근 / 갈은 당근 / 당근퓨레를 일반 당근으로 무조건 병합하지 않는다.

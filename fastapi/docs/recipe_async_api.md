@@ -82,7 +82,7 @@ v13의 trace.webSearchCacheHits와 webExtractionCacheHits는 프로세스 메모
 ]
 ```
 
-이것은 실제 추천 요리/원문 분량을 제시한 예시가 아니라 ID별 배분 형식 예시다. 원문 분량이 있어야만 계산한다. CALCULATED는 해당 배분량 계산 가능, UNRESOLVED는 분량/인분/단위 미확정, UNUSED는 계산된 사용량이 없다는 뜻이다. UNRESOLVED의 usedAmount=0을 실제로 필요 없다는 뜻으로 해석하지 않는다. 단위 환산이 불가능하면 임의로 개수/G를 바꾸지 않는다.
+이것은 실제 추천 요리/원문 분량을 제시한 예시가 아니라 ID별 배분 형식 예시다. 원문 분량이 있어야만 계산한다. CALCULATED는 해당 배분량 계산 가능, UNRESOLVED는 분량/단위 미확정, UNUSED는 계산된 사용량이 없다는 뜻이다. UNRESOLVED의 usedAmount=0을 실제로 필요 없다는 뜻으로 해석하지 않는다. 단위 환산이 불가능하면 임의로 개수/G를 바꾸지 않는다.
 
 사용자는 하나의 레시피를 선택한다. 10개의 사용량을 합산해 차감하면 안 된다. 백엔드는 선택 시 재고 fingerprint와 최신 수량을 확인하고 원자적으로 차감한다. AI 서버는 가상 배분만 반환한다.
 
@@ -143,7 +143,7 @@ AI_CIRCUIT_OPEN은 연결/과부하 일시 장애가 연속되어 원격 RANK �
 | excludedIngredientNames | [] | 별도 제외 재료 없음. 알레르기가 없다는 뜻은 아님 |
 | limit | 10 | 최대 추천 수. 적합 후보가 적으면 그 미만 |
 | preferenceTags | [] | 무취향 요청 |
-| targetServings | 2 | 요청 인분. 원문 인분/분량이 있어야 소모량 계산 가능 |
+| targetServings | 2 | 요청 인분. 원문 분량이 있어야 소모량 계산 가능(기준 인분 미표기는 1인분으로 가정) |
 | strategies | [USE_EXPIRING, MINIMIZE_SHOPPING, SIMPLE_COOKING] | 아래 전략 3종을 고려 |
 | pantryIngredientNames | [] | 추가 보유 확인 양념 목록을 전달하지 않음 |
 | recentRecipeIds | [] | 최근 추천 이력에 따른 재노출 조정 없음 |
@@ -180,11 +180,33 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
 
 문서의 한글은 설명/화면 표시 문구입니다. 실제 JSON 키는 아래 예시와 필드 표의 영문 camelCase를 그대로 사용합니다. 최종 미활용 임박 재료 등의 한글 설명을 JSON 키로 보내지 않습니다. name/reason/confirmationReasons 등 문자열 값에는 한글이 들어갈 수 있습니다.
 
+### 기준 인분 미표기와 필요량 계산
+
+원문에 기준 인분이 없으면 필요량 계산에 한해 1인분으로 가정한다. 원문 표기를 바꾸는 것은 아니므로 `baseServings`는 `null`로 유지한다.
+
+```text
+requiredAmount = amountValue × targetServings ÷ (baseServings 또는 1)
+```
+
+| 원문 | targetServings | requiredAmount |
+|---|---|---|
+| 당근 60g, 4인분 | 2 | 30 |
+| 당근 20g, 인분 미표기 | 2 | 40 |
+| 당근 약간 (`amountValue` 없음) | 2 | `null`, `UNKNOWN_AMOUNT` |
+
+백엔드는 필요량을 직접 곱해 만들지 말고 `ingredientRequirements[].requiredAmount`를 사용한다. `amountValue × targetServings`만 사용하면 기준 인분이 있는 레시피의 필요량이 틀어진다. `requiredAmount`가 `null`이면 원문 분량이 없는 재료이므로 확인 필요로 처리한다. 재고와 단위가 다르면 값은 계산되지만 `UNIT_MISMATCH`로 반환하며 개수와 G를 임의로 환산하지 않는다.
+
+1인분 가정을 적용한 결과에는 `warnings`의 `SOURCE_SERVINGS_UNAVAILABLE`(원문 인분 없음)과 `SOURCE_SERVINGS_ASSUMED_ONE`(1인분으로 가정해 계산)이 함께 포함되고, `confirmationReasons`에도 같은 내용이 포함된다.
+
+### 한식 정밀레시피 표시 필드
+
+`sourceAttribution`(string / null)은 출처와 공공누리 표시, `cookingNotes`(string 배열, 기본 `[]`)는 인덕션 불 세기 용어 같은 공통 안내다. 두 값은 `steps`에서 분리되어 전달되므로 백엔드는 조리 단계와 별도로 저장하고 표시한다. 다른 원천은 `null`과 `[]`일 수 있다.
+
 ### 결과 조회 JSON 예시
 
 전체 형태가 확인되도록 완료 예시를 제공합니다. 아래는 실제 Dev 무취향 시험 응답에서 recommendations의 1개와 빈 확인 후보 배열만 발췌한 형식 예시입니다. trace/원천/필드 값은 해당 시험의 값이며 새로운 호출의 고정 결과가 아닙니다.
 
-이 예시의 요청 재고는 순두부 400g / 애호박 200g / 대파 100g / 계란 200g / 팽이버섯 150g입니다. inventoryUsage는 레시피 재료 목록이 아니라 요청 당시 유효 재고 전체의 사용 계획이므로, 이 요리에 없는 애호박 / 대파 / 계란 / 팽이버섯도 allocationStatus=UNUSED로 포함됩니다. 순두부는 레시피에 매칭되지만 baseServings=null로 요청 인분의 필요량을 계산하지 못해 UNRESOLVED입니다. usedAmount=0은 실제로 필요하지 않다는 뜻이 아닙니다. ingredientId는 냉장고 재고 ID, ingredientNo는 레시피 내부 재료 번호이며 서로 다른 번호 체계입니다.
+이 예시의 요청 재고는 순두부 400g / 애호박 200g / 대파 100g / 계란 200g / 팽이버섯 150g입니다. inventoryUsage는 레시피 재료 목록이 아니라 요청 당시 유효 재고 전체의 사용 계획이므로, 이 요리에 없는 애호박 / 대파 / 계란 / 팽이버섯도 allocationStatus=UNUSED로 포함됩니다. 순두부는 레시피에 매칭되고 baseServings=null이므로 1인분으로 가정해 40g × 2 = 80g을 배분합니다. UNRESOLVED의 usedAmount=0은 실제로 필요하지 않다는 뜻이 아닙니다. ingredientId는 냉장고 재고 ID, ingredientNo는 레시피 내부 재료 번호이며 서로 다른 번호 체계입니다.
 
 <details>
 <summary>COMPLETED 응답 JSON 펼치기</summary>
@@ -213,6 +235,8 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
         "name": "순두부 사과 소스 오이무침",
         "imageUrl": "http://www.foodsafetykorea.go.kr/uploadimg/cook/10_00032_2.png",
         "sourceUrl": null,
+        "sourceAttribution": null,
+        "cookingNotes": [],
         "baseServings": null,
         "ingredients": [
           {
@@ -284,51 +308,51 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
           "오이"
         ],
         "excludedIngredientCheck": "PASSED",
-        "reason": "보유 재료 1종 사용, 추가로 확인할 재료 3종입니다. 3일 이내 소비기한 재료 순두부가 원문에 포함됩니다. 원문 조리 3단계이며 분량 상태는 NEEDS_CHECK입니다. 제목에 명시된 미보유 재료: 오이, 사과. 추가로 준비할 식재료: 다진 땅콩, 사과, 오이. 임박 재료 분산 활용: 순두부를 앞선 추천과 추가로 활용하도록 선정했습니다.",
+        "reason": "보유 재료 1종 사용, 추가로 확인할 재료 3종입니다. 3일 이내 소비기한 재료 순두부가 원문에 포함됩니다. 원문 조리 3단계이며 분량 상태는 SHORTAGE입니다. 제목에 명시된 미보유 재료: 오이, 사과. 추가로 준비할 식재료: 다진 땅콩, 사과, 오이. 임박 재료 분산 활용: 순두부를 앞선 추천과 추가로 활용하도록 선정했습니다.",
         "strategy": "USE_EXPIRING",
         "targetServings": 2,
-        "quantityStatus": "NEEDS_CHECK",
+        "quantityStatus": "SHORTAGE",
         "quantityScope": "FOOD_INGREDIENTS",
         "ingredientRequirements": [
           {
             "ingredientNo": 1,
             "name": "오이",
             "amountText": "오이 70g(1/3개)",
-            "requiredAmount": null,
+            "requiredAmount": 140.0,
             "unit": "G",
-            "allocatedAmount": null,
-            "shortageAmount": null,
-            "status": "UNKNOWN_AMOUNT"
+            "allocatedAmount": 0.0,
+            "shortageAmount": 140.0,
+            "status": "SHORTAGE"
           },
           {
             "ingredientNo": 2,
             "name": "다진 땅콩",
             "amountText": "다진 땅콩 10g(1큰술)",
-            "requiredAmount": null,
+            "requiredAmount": 20.0,
             "unit": "G",
-            "allocatedAmount": null,
-            "shortageAmount": null,
-            "status": "UNKNOWN_AMOUNT"
+            "allocatedAmount": 0.0,
+            "shortageAmount": 20.0,
+            "status": "SHORTAGE"
           },
           {
             "ingredientNo": 3,
             "name": "순두부",
             "amountText": "순두부 40g(1/8봉지)",
-            "requiredAmount": null,
+            "requiredAmount": 80.0,
             "unit": "G",
-            "allocatedAmount": null,
-            "shortageAmount": null,
-            "status": "UNKNOWN_AMOUNT"
+            "allocatedAmount": 80.0,
+            "shortageAmount": 0.0,
+            "status": "SUFFICIENT"
           },
           {
             "ingredientNo": 4,
             "name": "사과",
             "amountText": "사과 50g(1/3개)",
-            "requiredAmount": null,
+            "requiredAmount": 100.0,
             "unit": "G",
-            "allocatedAmount": null,
-            "shortageAmount": null,
-            "status": "UNKNOWN_AMOUNT"
+            "allocatedAmount": 0.0,
+            "shortageAmount": 100.0,
+            "status": "SHORTAGE"
           }
         ],
         "inventoryUsage": [
@@ -337,10 +361,15 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
             "name": "순두부",
             "unit": "G",
             "availableAmount": 400.0,
-            "usedAmount": 0.0,
-            "remainingAmount": 400.0,
-            "allocationStatus": "UNRESOLVED",
-            "allocations": []
+            "usedAmount": 80.0,
+            "remainingAmount": 320.0,
+            "allocationStatus": "CALCULATED",
+            "allocations": [
+              {
+                "ingredientNo": 3,
+                "usedAmount": 80.0
+              }
+            ]
           },
           {
             "ingredientId": 2,
@@ -394,7 +423,7 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
         ],
         "feasibility": "NEEDS_SHOPPING",
         "confirmationReasons": [
-          "원문 인분이 없어 요청 인분의 필요량을 확정할 수 없습니다."
+          "원문 기준 인분이 없어 1인분으로 가정해 요청 인분의 필요량을 계산했습니다."
         ],
         "usesExpiringMainIngredients": [
           "순두부"
@@ -415,7 +444,7 @@ strategies는 별도 추천 API나 절대 정렬 모드가 아닙니다. 임박 
       "UNREVIEWED_MISSING_INGREDIENTS_NEED_CHECK",
       "AI_INPUT_WINDOW_REDUCED",
       "SOURCE_SERVINGS_UNAVAILABLE",
-      "SOURCE_QUANTITIES_UNRESOLVED",
+      "SOURCE_SERVINGS_ASSUMED_ONE",
       "PARTIAL_STRATEGY_COVERAGE"
     ],
     "trace": {
