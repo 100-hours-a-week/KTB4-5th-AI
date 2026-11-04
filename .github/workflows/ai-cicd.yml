@@ -61,23 +61,27 @@ jobs:
           DIGEST: ${{ steps.docker.outputs.digest }}
         run: echo "image=$IMAGE_NAME@$DIGEST" >> "$GITHUB_OUTPUT"
 
-  deploy-v2:
-    name: v2 dev 배포
+  deploy-dev:
+    name: v3 dev 배포 요청
     needs: build
-    # 배포 절차는 CLOUD 저장소가 관리한다. 여기서는 빌드한 이미지만 넘긴다.
+    # CLOUD가 v3 dev 이미지 값을 main에 커밋하면 Argo CD가 반영한다(CLOUD #238).
     if: github.event_name == 'push'
-    permissions:
-      contents: read
-      id-token: write
-    uses: 100-hours-a-week/KTB4-5th-CLOUD/.github/workflows/ecs-deploy.yml@main
-    with:
-      service: ai
-      image: ${{ needs.build.outputs.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: CLOUD v3 dev 이미지 반영 실행
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "CLOUD_DISPATCH_TOKEN Secret이 필요합니다."; exit 1; }
+          gh workflow run v3-dev-image.yml --repo 100-hours-a-week/KTB4-5th-CLOUD --ref main -f app=ai-api -f image="$IMAGE"
+          echo "[CLOUD 반영 확인](https://github.com/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/v3-dev-image.yml): \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-stage:
     name: v2 stage 배포
-    # dev 배포에 성공한 같은 이미지를 stage에 올린다.
-    needs: [build, deploy-v2]
+    # dev 배포를 요청한 같은 이미지를 stage에 올린다.
+    needs: [build, deploy-dev]
     permissions:
       contents: read
       id-token: write
