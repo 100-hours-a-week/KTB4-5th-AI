@@ -79,17 +79,34 @@ jobs:
           echo "[CLOUD 반영 확인](https://github.com/100-hours-a-week/KTB4-5th-CLOUD/actions/workflows/v3-dev-image.yml): \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-stage:
-    name: v2 stage 배포
-    # dev 배포를 요청한 같은 이미지를 stage에 올린다.
+    name: v3 stage 이미지 반영
     needs: [build, deploy-dev]
-    permissions:
-      contents: read
-      id-token: write
-    uses: 100-hours-a-week/KTB4-5th-CLOUD/.github/workflows/ecs-deploy.yml@main
-    with:
-      env: stage
-      service: ai
-      image: ${{ needs.build.outputs.image }}
+    # main 이미지를 CLOUD v3 stage 값에 반영한다. prod는 CLOUD에서 이 반영이 성공한 digest만 승인한다(CLOUD #277).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: CLOUD v3 stage 이미지 반영 실행·완료 확인
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_DISPATCH_TOKEN }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          SOURCE_REPO: ${{ github.event.repository.name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo "CLOUD_DISPATCH_TOKEN Secret이 필요합니다."; exit 1; }
+          cloud=100-hours-a-week/KTB4-5th-CLOUD
+          gh workflow run v3-stage-image.yml --repo "$cloud" --ref main -f app=ai-api -f image="$IMAGE" -f repository="$SOURCE_REPO" -f run_id="$RUN_ID" -f run_attempt="$RUN_ATTEMPT"
+          # 실행 이름(v3 stage <저장소> <실행ID>.<재시도> <이미지>)으로 이번 요청의 실행을 찾아 끝날 때까지 기다린다.
+          title="v3 stage $SOURCE_REPO $RUN_ID.$RUN_ATTEMPT $IMAGE"
+          for i in $(seq 1 60); do
+            run=$(gh api "repos/$cloud/actions/workflows/v3-stage-image.yml/runs?per_page=30" --jq ".workflow_runs[] | select(.display_title == \"$title\") | \"\(.status) \(.conclusion) \(.html_url)\"" | head -1)
+            case $run in completed\ success*) echo "반영 완료: ${run##* }" >> "$GITHUB_STEP_SUMMARY"; exit 0 ;;
+              completed*) echo "CLOUD 반영 실패: $run"; exit 1 ;; esac
+            sleep 10
+          done
+          echo "CLOUD 반영이 끝나지 않았습니다."; exit 1
 
   request-prod:
     name: CLOUD prod 승인 요청
