@@ -1,6 +1,6 @@
 # 이미지 분석 Kafka 연동
 
-`KAFKA_ENABLED=true`로 활성화한다. 기본값은 `false`이며 기존 HTTP API도 유지한다.
+Kafka 어댑터는 기본으로 활성화되며 기존 HTTP API도 유지한다. 브로커와 아래 세 토픽을 앱 시작 전에 준비해야 한다. 준비되지 않은 환경에서는 `KAFKA_ENABLED=false`로 명시해 비활성화할 수 있다.
 Kafka 요청은 기존 분석 런타임을 실행하고 `build_callback_payload`로 만든 동일한 result/error를
 완료 이벤트에 넣는다. Kafka로만 접수한 분석은 HTTP 콜백을 호출하지 않는다.
 완료 전달 전 같은 요청을 HTTP와 Kafka로 모두 접수하면 분석은 한 번 실행하고 Kafka 완료 이벤트를 우선한다. HTTP 콜백은 중복 전송하지 않는다.
@@ -10,7 +10,7 @@ OCR·모델 호출·분류·레시피·학습 정책은 기존 실행 경로를 
 
 | 환경변수 | 기본값 | 용도 |
 | --- | --- | --- |
-| `KAFKA_ENABLED` | `false` | Kafka 어댑터 활성화 |
+| `KAFKA_ENABLED` | `true` | Kafka 어댑터 활성화 |
 | `KAFKA_ENV` | `local` | 토픽과 AI 소비 그룹의 환경 접두사 |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | 브로커 목록(쉼표 구분 가능), PLAINTEXT |
 | `KAFKA_MAX_POLL_INTERVAL_MS` | `300000` | 소비 polling 간격 제한 |
