@@ -1,5 +1,7 @@
 # 다먹자 FastAPI 서비스
 
+Kafka 분석 요청·완료·피드백 연동은 [Kafka 설정과 처리 경계](docs/kafka.md)를 참고한다.
+
 레시피 추천은 확정 재고와 취향 태그를 별도 비동기 큐에 접수하고 HTTP 202와 jobId를 반환한다. PostgreSQL 원천/분량 검증, 승인 원천 보충, Gemma의 취향 적합 판단과 순위 조정 후 임박 재료를 분산 활용하는 최대 10개의 대안을 구성한다. 각 레시피에는 소비기한순 재고 ID별 사용량을 포함하며 실제 차감은 하지 않는다. 완료 결과는 조회 API와 레시피 전용 콜백으로 전달한다. 취향이 없으면 계절/시간대와 요청별 다양성 seed를 사용한다. 상세 계약은 [레시피 비동기 API](docs/recipe_async_api.md), 정책은 [AI 재고 활용 추천 설계](docs/recipe_ai_recommendations.md)를 따른다.
 
 이 폴더는 다먹자 이미지 분석 시스템의 **제어 영역(control plane)** 이다. 백엔드의 분석 요청을
@@ -29,6 +31,7 @@ FastAPI는 외부 백엔드와 GPU 추론 서버 사이의 경계다. 백엔드�
 ### 분석 작업 수명주기
 
 - `POST /ai/v1/analyses`로 요청을 접수하고 `analysisId`를 발급한다.
+- Kafka 분석 요청에는 필수 양의 정수 `refrigeratorId`를 전달하며 완료 이벤트에도 같은 값을 보존한다. 기존 HTTP 분석 요청에서는 생략할 수 있다.
 - 같은 `requestId`가 재전송되면 기존 작업을 반환해 중복 처리를 방지한다.
 - 기본 100개의 인메모리 대기열과 제한된 수의 컨슈머로 순간 요청량을 흡수한다.
 - 작업을 `QUEUED → PROCESSING → COMPLETED/FAILED` 상태로 관리한다.

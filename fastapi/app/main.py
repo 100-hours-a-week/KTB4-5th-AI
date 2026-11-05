@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -7,6 +7,7 @@ from fastapi.openapi.utils import get_openapi
 
 from app.adapters.callback import CallbackDelivery
 from app.adapters.feedback_repository import PostgresFeedbackRepository
+from app.adapters.kafka import AnalysisKafka
 from app.adapters.product_catalog import PostgresProductCatalogLookup
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.adapters.shelf_life import PostgresShelfLifeLookup
@@ -57,17 +58,18 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
     @asynccontextmanager
     # 앱 시작 시 런타임을 시작하고 종료 시 백그라운드 작업과 자원을 정리한다.
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await app_runtime.start()
-        await recipe_jobs.start()
-        try:
+        async with AsyncExitStack() as resources:
+            resources.callback(shutdown_logging)
+            resources.push_async_callback(recipe_service.close)
+            resources.push_async_callback(app_runtime.stop)
+            await app_runtime.start()
+            resources.push_async_callback(recipe_jobs.stop)
+            await recipe_jobs.start()
+            if app_settings.kafka_enabled:
+                kafka = AnalysisKafka(app_settings, app_runtime)
+                resources.push_async_callback(kafka.stop)
+                await kafka.start()
             yield
-        finally:
-            try:
-                await recipe_jobs.stop()
-            finally:
-                await app_runtime.stop()
-                await recipe_service.close()
-                shutdown_logging()
 
     application = FastAPI(
         title="KTB Image AI",
