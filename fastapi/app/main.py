@@ -9,6 +9,7 @@ from app.adapters.callback import CallbackDelivery
 from app.adapters.feedback_repository import PostgresFeedbackRepository
 from app.adapters.kafka import AnalysisKafka
 from app.adapters.product_catalog import PostgresProductCatalogLookup
+from app.adapters.recommendation_kafka import RecommendationKafka
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.adapters.shelf_life import PostgresShelfLifeLookup
 from app.config import Settings, get_settings
@@ -69,6 +70,10 @@ def create_app(settings: Settings | None = None, runtime: AnalysisRuntime | None
                 kafka = AnalysisKafka(app_settings, app_runtime)
                 resources.push_async_callback(kafka.stop)
                 await kafka.start()
+            if app_settings.recommendation_kafka_enabled:
+                recommendation_kafka = RecommendationKafka(app_settings, recipe_jobs)
+                resources.push_async_callback(recommendation_kafka.stop)
+                await recommendation_kafka.start()
             yield
 
     application = FastAPI(

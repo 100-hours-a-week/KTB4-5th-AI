@@ -78,3 +78,16 @@ ACK 후 offset 커밋 전 장애에서 재전달되면 새 analysisId와 결과�
 [producer ACK·idempotence](https://aiokafka.readthedocs.io/en/stable/producer.html),
 [poll 간격과 heartbeat](https://aiokafka.readthedocs.io/en/stable/api.html#aiokafka.AIOKafkaConsumer)를
 확인했다(2026-11-01). heartbeat만으로 장기 작업을 맡기지 않고 별도 polling을 유지한다.
+
+## 추천 요청과 완료
+
+`RECOMMENDATION_KAFKA_ENABLED=true`일 때만 추천 consumer를 시작한다. `KAFKA_ENV`와
+`KAFKA_BOOTSTRAP_SERVERS`는 공통 Kafka 설정을 사용한다. 시작 전에
+`${KAFKA_ENV}.dameokja.recommendation.requested.v1`과
+`${KAFKA_ENV}.dameokja.recommendation.completed.v1` 토픽,
+`DATABASE_URL`과 기존 `022_recipe_recommendation_results.sql` 스키마를 준비한다.
+
+요청과 완료는 `{"messageId": "<UUID>", "payload": {...}}` 구조이며 Kafka key는 문자열 사용자 ID다.
+완료 이력을 PostgreSQL에 저장하고 완료 이벤트의 브로커 ACK를 받은 뒤 요청 offset을 커밋한다.
+같은 요청이 다시 들어오면 기존 완료 이력을 읽어 같은 완료 이벤트 ID로 발행한다.
+HTTP로 접수한 작업은 기존 콜백을 전달하고 Kafka로만 접수한 작업은 완료 이벤트를 발행한다.
