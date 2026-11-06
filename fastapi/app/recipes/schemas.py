@@ -221,7 +221,7 @@ class RecommendedRecipe(RecipeSnapshot):
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v24"
+    policyVersion: str = "recipe-rerank-v25"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
@@ -259,6 +259,9 @@ class RecommendationResponse(Contract):
     warnings: list[str] = Field(default_factory=list)
     trace: RecommendationTrace = Field(default_factory=RecommendationTrace)
     preferenceTags: list[str] = Field(default_factory=list)
+    # 취향 요청 결과다. NOT_FOUND는 웹 보충 뒤에도 맞는 레시피가 없어 취향과 무관한 추천을 반환했다는 뜻이며 notice에 사용자 안내 문구를 담는다.
+    preferenceResult: Literal["NOT_REQUESTED", "MATCHED", "NOT_FOUND"] = "NOT_REQUESTED"
+    notice: str | None = None
     # 계절 / 식사 시간대 / 날씨(weather 객체, 조회 실패 시 없음) 등 추천 시점 정보다.
     context: dict[str, Any] = Field(default_factory=dict)
 

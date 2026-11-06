@@ -15,7 +15,7 @@ from app.recipes.ai_contract import PROMPT_VERSION, TasteProfile
 from app.recipes.attribute_repository import RecipeAttributeRepository
 from app.recipes.candidate_pool import coverage_counts, representative_candidates
 from app.recipes.context import recommendation_context
-from app.recipes.context_reasons import situation_priority, situation_sentence, verify_factors
+from app.recipes.context_reasons import situation_priority, verify_factors
 from app.recipes.diagnostics import candidate_diagnostics
 from app.recipes.evaluation import compare_rankings
 from app.recipes.food_safety import FoodSafetyProvider
@@ -29,7 +29,7 @@ from app.recipes.repository import RecipeRepository
 from app.recipes.result_cache import RecipeResultCache, recommendation_key
 from app.recipes.retrieval import allowed, canonical, is_excluded, missing_named_ingredients, query_variants
 from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationResponse, normalize
-from app.recipes.selection import candidate_priority, preference_candidates, select_recommendations
+from app.recipes.selection import preference_candidates, select_recommendations
 from app.recipes.stock_names import stock_ingredient
 from app.recipes.suitability import DEFAULT_PANTRY_NAMES, WATER_NAMES, assess_suitability, ingredient_role
 from app.recipes.taste_profiles import preference_decisions
@@ -40,6 +40,9 @@ from app.recipes.web_provider import WebRecipeProvider
 logger = logging.getLogger(__name__)
 DEFERRED_RECIPE_TTL_SECONDS = 3600
 DEFERRED_RECIPE_MAX_ENTRIES = 200
+# 취향 웹 보충은 검색 / 추출 / 재판정 시간이 남아 있을 때만 기다린다.
+PREFERENCE_SUPPLY_MIN_SECONDS = 5
+PREFERENCE_NOT_FOUND_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요."
 
 
 class RecipeService:
@@ -273,22 +276,78 @@ class RecipeService:
             can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags))
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
             ranker.hydrate(context, baseline)
-            # 같은 재료의 후보를 모두 정상 평가한 뒤에도 취향 일치가 없을 때만 웹 보충한다.
-            supported = ranker.preference_matches
-            valid_evaluated = ranker.evaluated_identities - ranker.rejected_preference_identities - set(ranker.rejected_preference_tags)
-            preference_focus = preference_search_focus(inventory, baseline, request.preferenceTags, supported)
-            proven_focus = []
-            for name in preference_focus:
-                relevant = {(row["source"], row["sourceRecipeId"]) for row in baseline
-                            if canonical(name) in {canonical(value) for value in row["usesExpiringMainIngredients"]}}
-                if relevant and relevant <= valid_evaluated:
-                    proven_focus.append(name)
-            if request.preferenceTags and proven_focus and not supply_used and self._defer_supply(proven_focus, search_names, request.preferenceTags, False, usable):
-                ranker.warnings.append("RECIPE_SUPPLY_DEFERRED")
+
+            # 행별 취향 판정을 반영한다. 웹 보충 뒤 다시 판정해도 문구가 겹치지 않게 기본 문구에서 다시 만든다.
+            def assess_preferences(rows: list[dict]) -> None:
+                evaluated = ranker.evaluated_identities
+                for row in rows:
+                    row["reason"] = row.setdefault("_baseReason", row["reason"])
+                    identity = (row["source"], row["sourceRecipeId"])
+                    row["preferenceMatch"] = ("NOT_REQUESTED" if not request.preferenceTags else "MATCHED" if identity in ranker.preference_matches
+                                              else "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities else "UNKNOWN")
+                    tag_evidence = dict(ranker.preference_tag_evidence.get(identity, {}))
+                    profiled = preference_decisions(TasteProfile.model_validate(row["tasteProfile"]), request.preferenceTags) if row.get("tasteProfile") else {}
+                    for tag, (status, quote) in profiled.items():
+                        tag_evidence.pop(tag, None)
+                        if status == "MATCHED" and quote:
+                            tag_evidence[tag] = quote
+                    row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED" if tag in tag_evidence else
+                                                      "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities
+                                                      and tag not in ranker.rejected_preference_tags.get(identity, set()) else "UNKNOWN",
+                                                      "evidence": tag_evidence.get(tag)} for tag in request.preferenceTags]
+                    # 저장 프로필의 불확실성은 보존하고 태그별 상태를 우선한다.
+                    for assessment in row["preferenceAssessments"]:
+                        status = profiled.get(assessment["tag"], (None, None))[0]
+                        if status is not None:
+                            assessment["status"] = status
+                            assessment["evidence"] = tag_evidence.get(assessment["tag"]) if status == "MATCHED" else None
+                    # 요리 종류 / 난이도 / 식사 목적 / 식감은 저장된 AI 분류로만 판정한다. 분류가 없으면 미확인이다.
+                    classified = attribute_decisions(row["recipeAttributes"], request.preferenceTags) if row.get("recipeAttributes") else {}
+                    for assessment in row["preferenceAssessments"]:
+                        if attribute_tag(assessment["tag"]):
+                            status, evidence = classified.get(assessment["tag"], ("UNKNOWN", None))
+                            assessment["status"], assessment["evidence"] = status, evidence
+                            tag_evidence.pop(assessment["tag"], None)
+                            if status == "MATCHED" and evidence:
+                                tag_evidence[assessment["tag"]] = evidence
+                    if request.preferenceTags:
+                        # 여러 태그 중 하나만 맞아도 일치로 보지 않는다. 맛 등 인용 검증 태그는 모두 일치해야 한다.
+                        row["preferenceMatch"] = combine_preference_status({item["tag"]: item["status"] for item in row["preferenceAssessments"]})
+                    if row["preferenceMatch"] == "MATCHED" and tag_evidence:
+                        row["preferenceEvidence"] = next(iter(tag_evidence.values()))
+                        row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
+                    elif row["preferenceMatch"] == "NOT_MATCHED":
+                        row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않았습니다."
+
+            def preference_found() -> bool:
+                return any(row.get("preferenceMatch") == "MATCHED" for row in baseline)
+
+            assess_preferences(baseline)
+            # 취향에 맞는 레시피가 없으면 응답 전에 취향 조건으로 웹 보충을 한 번 기다리고 새 후보를 다시 판정한다.
+            if request.preferenceTags and names and not preference_found():
+                before = {(row["source"], row["sourceRecipeId"]) for row in ranked}
+                focus_names = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches) or search_names[:2]
+                if supply_used or deadline - monotonic() < PREFERENCE_SUPPLY_MIN_SECONDS:
+                    ranker.warnings.append("PREFERENCE_WEB_SUPPLY_SKIPPED")
+                else:
+                    if await supplement(focus_names, allow_food_safety=False):
+                        ranker.warnings.append("PREFERENCE_WEB_SUPPLY_USED")
+                        added = [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in before]
+                        window = list({(row["source"], row["sourceRecipeId"]): row for row in
+                                       [*added, *preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)]}.values())
+                        window = window[:min(12, self.settings.recipe_ai_max_candidates)]
+                        ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
+                        if self.settings.recipe_ai_enabled and window:
+                            second = await ranker.rank(context, window)
+                            if second is not None:
+                                selected, shortlist = second, window
+                    # 보충은 새 후보가 없어도 후보 목록을 다시 만들므로 항상 다시 판정한다.
+                    ranker.hydrate(context, baseline)
+                    assess_preferences(baseline)
+            # 웹 보충 뒤에도 맞는 레시피가 없으면 취향과 무관하게 추천하고 찾지 못했다고 알린다.
+            preference_fallback = bool(request.preferenceTags) and not preference_found()
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
-            confirmations = confirmation_rows[:3]
-            if confirmations:
-                ranker.warnings.append("CONFIRMATION_CANDIDATES_SEPARATED")
+            assess_preferences(confirmation_rows)
             missing_main_count = sum(bool(row["_suitability"]["missingMain"]) for row in ranked)
             unresolved_count = sum(bool(row["_suitability"]["unresolvedMissing"]) for row in ranked)
             if missing_main_count:
@@ -298,52 +357,13 @@ class RecipeService:
             if any(row.get("tasteProfile") for row in baseline):
                 ranker.warnings.append("TASTE_PROFILE_USED")
             evaluated = ranker.evaluated_identities
-            for row in [*baseline, *confirmations]:
-                identity = (row["source"], row["sourceRecipeId"])
-                row["preferenceMatch"] = ("NOT_REQUESTED" if not request.preferenceTags else "MATCHED" if identity in ranker.preference_matches
-                                          else "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities else "UNKNOWN")
-                tag_evidence = dict(ranker.preference_tag_evidence.get(identity, {}))
-                profiled = preference_decisions(TasteProfile.model_validate(row["tasteProfile"]), request.preferenceTags) if row.get("tasteProfile") else {}
-                for tag, (status, quote) in profiled.items():
-                    tag_evidence.pop(tag, None)
-                    if status == "MATCHED" and quote:
-                        tag_evidence[tag] = quote
-                row["preferenceAssessments"] = [{"tag": tag, "status": "MATCHED" if tag in tag_evidence else
-                                                  "NOT_MATCHED" if identity in evaluated and identity not in ranker.rejected_preference_identities
-                                                  and tag not in ranker.rejected_preference_tags.get(identity, set()) else "UNKNOWN",
-                                                  "evidence": tag_evidence.get(tag)} for tag in request.preferenceTags]
-                # 저장 프로필의 불확실성은 보존하고 태그별 상태를 우선한다.
-                for assessment in row["preferenceAssessments"]:
-                    status = profiled.get(assessment["tag"], (None, None))[0]
-                    if status is not None:
-                        assessment["status"] = status
-                        assessment["evidence"] = tag_evidence.get(assessment["tag"]) if status == "MATCHED" else None
-                # 요리 종류 / 난이도 / 식사 목적 / 식감은 저장된 AI 분류로만 판정한다. 분류가 없으면 미확인이다.
-                classified = attribute_decisions(row["recipeAttributes"], request.preferenceTags) if row.get("recipeAttributes") else {}
-                for assessment in row["preferenceAssessments"]:
-                    if attribute_tag(assessment["tag"]):
-                        status, evidence = classified.get(assessment["tag"], ("UNKNOWN", None))
-                        assessment["status"], assessment["evidence"] = status, evidence
-                        tag_evidence.pop(assessment["tag"], None)
-                        if status == "MATCHED" and evidence:
-                            tag_evidence[assessment["tag"]] = evidence
-                if request.preferenceTags:
-                    # 여러 태그 중 하나만 맞아도 일치로 보지 않는다. 맛 등 인용 검증 태그는 모두 일치해야 한다.
-                    row["preferenceMatch"] = combine_preference_status({item["tag"]: item["status"] for item in row["preferenceAssessments"]})
-                if row["preferenceMatch"] == "MATCHED" and tag_evidence:
-                    row["preferenceEvidence"] = next(iter(tag_evidence.values()))
-                    row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
-                elif row["preferenceMatch"] == "NOT_MATCHED":
-                    row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않아 취향 일치 후보보다 후순위입니다."
-            # 모델이 고른 상황 이유를 날씨 / 시간대 / 계절 / 저장 속성과 대조한다. 맞지 않는 이유는 버리고 문구에 쓰지 않는다.
+            # 날씨 / 시간대 / 계절 판단은 취향이 없거나 취향에 맞는 레시피를 찾지 못했을 때만 순서에 쓴다. 사용자 문구에는 쓰지 않는다.
             situation = context["recommendationContext"]
-            for row in [*baseline, *confirmations]:
+            use_situation = not request.preferenceTags or preference_fallback
+            for row in [*baseline, *confirmation_rows]:
                 verified, rejected = verify_factors(row, ranker.context_factors.get((row["source"], row["sourceRecipeId"]), []), situation)
-                row["contextFactors"] = verified
-                row["_situationPriority"] = situation_priority(verified)
-                sentence = situation_sentence(verified, situation)
-                if sentence:
-                    row["reason"] += " " + sentence
+                row["contextFactors"] = verified if use_situation else []
+                row["_situationPriority"] = situation_priority(verified) if use_situation else (1, 0)
                 if rejected:
                     ranker.warnings.append("AI_CONTEXT_REASON_REJECTED")
                     logger.info("recipe_context_reason_rejected factors=%s", ",".join(rejected))
@@ -369,27 +389,29 @@ class RecipeService:
             for row in ordered:
                 row["_urgentInventoryIds"] = context["expiryPolicy"]["expiringIngredientIds"]
                 row["_urgentInventoryNames"] = {item.ingredientId: item.name for item in inventory}
-            eligible, uncertain = preference_candidates(ordered, matched_request)
-            if request.preferenceTags:
+            eligible, _ = preference_candidates(ordered, matched_request)
+            selection_request = matched_request
+            if preference_fallback:
+                # 취향 판정을 무시하고 임박 활용 / 상황 판단 순서로 고른다. 확인된 불일치는 미확인보다 뒤에 둔다.
+                eligible = list(ordered)
+                selection_request = matched_request.model_copy(update={"preferenceTags": []})
+                confirmations = confirmation_rows[:3]
+                ranker.warnings.extend(["PREFERENCE_MATCH_COUNT_BELOW_LIMIT", "PREFERENCE_MATCH_NOT_FOUND"])
+            elif request.preferenceTags:
                 if len(eligible) < request.limit:
                     ranker.warnings.append("PREFERENCE_MATCH_COUNT_BELOW_LIMIT")
-                # 적합성 확인과 취향 미확인을 같은 필드에 담되 사유로 구분하며, 추천과 중복하지 않는다.
+                # 취향에 맞는 레시피가 있으면 취향 미확인 / 불일치 후보는 확인 후보로도 내보내지 않는다.
                 seen = {(row["source"], row["sourceRecipeId"]) for row in eligible}
-                candidates = []
-                for original in [*sorted(uncertain, key=candidate_priority), *confirmations]:
-                    identity = (original["source"], original["sourceRecipeId"])
-                    if identity in seen or original.get("preferenceMatch") == "NOT_MATCHED":
-                        continue
-                    seen.add(identity)
-                    row = dict(original)
-                    if row.get("preferenceMatch") == "UNKNOWN":
-                        row["confirmationReasons"] = [*row.get("confirmationReasons", []), "요청 취향의 일치 여부가 미확인입니다."]
-                        row["reason"] += " 취향 미확인으로 정식 추천과 분리한 확인 후보입니다."
-                    candidates.append(row)
-                confirmations = candidates[:3]
-                if confirmations:
-                    ranker.warnings.append("PREFERENCE_UNVERIFIED_CANDIDATES_SEPARATED")
-            result = select_recommendations(eligible, matched_request, context["recommendationContext"]["variationSeed"])
+                confirmations = [dict(row) for row in confirmation_rows
+                                 if row.get("preferenceMatch") == "MATCHED" and (row["source"], row["sourceRecipeId"]) not in seen][:3]
+            else:
+                confirmations = confirmation_rows[:3]
+            if confirmations:
+                ranker.warnings.append("CONFIRMATION_CANDIDATES_SEPARATED")
+            result = select_recommendations(eligible, selection_request, context["recommendationContext"]["variationSeed"])
+            if preference_fallback:
+                for row in result:
+                    row["reason"] += " 선택한 취향에 맞는 레시피를 찾지 못해 대신 추천한 요리입니다."
             if len(result) < request.limit:
                 ranker.warnings.append("CANDIDATE_COUNT_BELOW_REQUEST_LIMIT")
             if any(row["missingIngredients"] for row in result):
@@ -435,6 +457,8 @@ class RecipeService:
                                           uncoveredExpiringIngredients=focus,
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
+                                          preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
+                                          notice=PREFERENCE_NOT_FOUND_NOTICE if preference_fallback else None,
                                           context=context["recommendationContext"],
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
                                                  "tasteProfileCount": used_profiles,

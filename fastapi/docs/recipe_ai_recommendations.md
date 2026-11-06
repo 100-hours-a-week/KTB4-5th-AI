@@ -1,4 +1,4 @@
-# 냉장고 레시피 추천 설계 v24
+# 냉장고 레시피 추천 설계 v25
 
 정책은 `recipe-rerank-v20`, Worker 계약은 `recipe-grounded-v10`이다. 이번 v20은 FastAPI만 변경하며 기존 Worker v10과 호환된다. 원천별 맛 평가에는 기존 023 SQL이 별도로 필요하다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
 
@@ -51,7 +51,7 @@ flowchart TD
 
 Gemma는 원문에 근거한 취향 판정을 담당한다. 최종 순서는 FastAPI가 정하며 모델이 재고 수량 / 소비기한 / 가격을 재계산하지 않는다. 입력 후보 ID 순서는 유지하도록 요청하고 원문 인용과 태그별 판정을 검증한다.
 
-`preferenceMatch`는 MATCHED / NOT_MATCHED / UNKNOWN / NOT_REQUESTED다. 태그별 상태는 `preferenceAssessments`의 tag / status / evidence로 제공한다. MATCHED는 하나 이상의 태그가 유효한 원문 근거를 갖는다는 뜻이며 전체 태그 충족이나 알레르기 안전을 보증하지 않는다. 미평가 / 실패 / 거부된 근거는 UNKNOWN이다.
+`preferenceMatch`는 MATCHED / NOT_MATCHED / UNKNOWN / NOT_REQUESTED다. 태그별 상태는 `preferenceAssessments`의 tag / status / evidence로 제공한다. MATCHED는 v24부터 맛 등 원문 인용 태그가 모두 유효한 근거를 갖는다는 뜻이며 알레르기 안전을 보증하지 않는다. 미평가 / 실패 / 거부된 근거는 UNKNOWN이다.
 
 후보가 많은 식재료가 평가 창을 독점하지 않도록 임박 주재료별 대표 후보를 먼저 확보한다. 잔여 슬롯으로 적은 수의 후보를 가진 재료의 평가를 완성한다. 입력은 기본 16,000바이트 / 최대 24,000바이트이며, 초과 시 대표성을 고려한 평가 창만 줄인다. 원문 재료 / 분량 / 조리 단계는 공개 결과에서 보존한다. `AI_INPUT_WINDOW_REDUCED`는 전체 DB에 후보가 없다는 뜻이 아니다.
 
@@ -123,8 +123,8 @@ FastAPI / Worker를 함께 배포하고 먼저 DB 소유자 권한으로 023_rec
 
 ## v20 추천 적합성과 임박 소모량
 
-- 취향 태그가 있으면 검증된 `MATCHED` 후보만 `recommendations`에 포함한다. 부족 재료가 있더라도 일치 후보는 유지한다. 10개를 맞추기 위해 `UNKNOWN` / `NOT_MATCHED`를 채우지 않는다. 일치 후보가 없으면 정상 완료 결과의 추천 배열이 비어 있을 수 있다.
-- `UNKNOWN`은 불일치가 아니다. 기존 재료 종류 확인 후보와 함께 `confirmationCandidates` 최대 3개에 분리하고 `confirmationReasons`에 취향 미확인 사유를 표시한다. 명시적 `NOT_MATCHED`는 두 배열에서 제외한다. 이 배열은 10위 밖 차순위 목록이 아니다.
+- 취향 태그가 있으면 검증된 `MATCHED` 후보만 `recommendations`에 포함한다. 부족 재료가 있더라도 일치 후보는 유지한다. 10개를 맞추기 위해 `UNKNOWN` / `NOT_MATCHED`를 채우지 않는다. 일치 후보가 없으면 v25부터 웹 보충 뒤 대체 추천과 `notice`를 반환한다(아래 v25 절).
+- `UNKNOWN`은 불일치가 아니지만 v25부터 취향 일치 결과에서는 `confirmationCandidates`에 넣지 않는다. 확인 후보는 재료 종류 확인이 필요한 MATCHED 후보만 담는다. 이 배열은 10위 밖 차순위 목록이 아니다.
 - 취향이 없으면 기존 재고 / 임박 활용 / 구매 부담 기준의 추천을 유지한다. 취향 미확인을 만드는 장애가 나면 취향 일치로 위장하지 않고 확인 후보와 경고를 반환한다.
 - 기존 취향 / 소비기한 우선순위 안에서 제목에 명시된 임박 주재료, 재료 사전상 임박 주재료, 부재료 포함을 구분한다. 사전상 MAIN이라고 무조건 요리의 중심이라 확정하지 않는다.
 - 같은 조건이면 기존 `inventoryUsage`의 확정 배분값으로 임박 재고 소모 비율을 비교한다. 임박 재고 ID만 포함하고 여유 재고는 분모에서 제외한다. 같은 재료 / 단위별 사용량을 가용량으로 나눈 후 그룹 평균을 비교한다. g와 개수를 절대량으로 합하지 않는다. 이는 목록 내 여러 레시피를 함께 조리한 배분이나 실제 차감이 아니다.
@@ -192,3 +192,11 @@ python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --a
 4. 표본 검수: `python -m app.recipes.attribute_backfill --sample 100 --output /tmp/attribute-sample.csv` 후 `correct_*` 열에 정답을 적어 항목별 정확도를 잰다. 정확도가 낮은 항목은 프롬프트 / 규칙을 고친 뒤 `ATTRIBUTE_PROMPT_VERSION`을 올려 다시 분류한다.
 
 맛 평가(023)와 웹 추출 캐시는 단계별 버전(`PROFILE_PROMPT_VERSION`, `EXTRACT_PROMPT_VERSION`)을 따로 쓰므로 이번 RANK 프롬프트 변경으로 다시 만들 필요가 없다.
+
+
+## v25 취향 우선 / 웹 보충 / 대체 추천
+
+1. 취향 태그가 있으면 모든 맛 태그가 확인된(MATCHED) 레시피만 추천한다. 미확인 / 불일치 후보는 확인 후보로도 내보내지 않는다. 백엔드가 확인 후보를 목록에 합쳐 보여주더라도 취향과 무관한 레시피가 섞이지 않게 하기 위해서다.
+2. 맞는 레시피가 없으면 응답 전에 취향 태그를 넣은 웹 보충을 한 번 기다린다. 이전에는 백그라운드로 미뤄 다음 요청에만 반영했다. 새 후보가 생기면 RANK를 한 번 더 호출해 다시 판정하므로, 이 경우 GPU 호출은 최대 2회이고 응답이 늦어질 수 있다(웹 보충 최대 8초 + 재판정).
+3. 그래도 없으면 `preferenceResult=NOT_FOUND`, `notice` 안내 문구와 함께 취향과 무관한 추천을 반환한다. 이때 날씨 / 시간대 판단으로 순서를 정한다.
+4. 날씨는 화면에 보이지 않는 순서 판단용 정보다. `reason`에 날씨 문장을 붙이지 않는다.

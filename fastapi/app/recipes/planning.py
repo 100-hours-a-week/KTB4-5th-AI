@@ -27,7 +27,7 @@ from app.recipes.taste_profiles import preference_decisions, uncertain_unmatched
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v24"
+POLICY_VERSION = "recipe-rerank-v25"
 
 
 # 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
