@@ -17,7 +17,8 @@ from app.recipes.taste_profiles import EVALUATION_VERSION
 
 
 # userId / refrigeratorId가 포함된 본문으로 사용자별 캐시를 분리한다. 새 requestId는 취향 캐시를 무효화하지 않는다.
-def recommendation_key(request: RecommendationRequest, settings: Settings, policy: str) -> str:
+# 날씨는 관측 기준 시각과 구간만 키에 넣는다. 같은 시각의 같은 날씨면 추천 스냅샷을 재사용한다.
+def recommendation_key(request: RecommendationRequest, settings: Settings, policy: str, weather: dict | None = None) -> str:
     body = request.model_dump(mode="json", exclude={"requestId"})
     body["preferenceTags"] = sorted(request.preferenceTags)
     body["recentRecipeIds"] = sorted(request.recentRecipeIds)
@@ -27,7 +28,8 @@ def recommendation_key(request: RecommendationRequest, settings: Settings, polic
     config = [policy, MATCH_VERSION, TITLE_MATCH_VERSION, PROMPT_VERSION, EVALUATION_VERSION, settings.ollama_model, settings.recipe_ai_enabled,
               settings.recipe_taste_profiles_enabled, settings.recipe_ai_max_candidates, settings.recipe_ai_input_max_bytes, settings.recipe_ai_rank_timeout_seconds,
               settings.recipe_supply_timeout_seconds, bool(settings.recipe_tavily_api_key), sorted(settings.recipe_tavily_approved_domains),
-              bool(settings.recipe_food_safety_api_key), settings.recipe_food_safety_storage_approved]
+              bool(settings.recipe_food_safety_api_key), settings.recipe_food_safety_storage_approved, settings.recipe_attributes_enabled,
+              [weather.get("observedAt"), weather.get("temperatureBand"), weather.get("precipitation")] if weather else None]
     return hashlib.sha256(json.dumps([body, context, config], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 

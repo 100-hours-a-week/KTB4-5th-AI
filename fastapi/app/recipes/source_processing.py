@@ -12,7 +12,7 @@ import httpx
 from app.config import Settings
 from app.errors import AppError
 from app.recipes.ai import RecipeReasoner
-from app.recipes.ai_contract import PROMPT_VERSION
+from app.recipes.ai_contract import EXTRACT_PROMPT_VERSION
 from app.recipes.schemas import Recipe, Step
 from app.recipes.source_parsing import parse_failure_reason, parse_web_recipe
 from app.recipes.tavily import DiscoveryHit
@@ -51,7 +51,7 @@ class RecipeSourceProcessor:
             return SourceOutcome(failure="SOURCE_BUDGET_EXHAUSTED", unavailable=True)
         clean = source_text(hit.rawContent or "")
         raw_hash = hashlib.sha256((hit.rawContent or "").encode()).hexdigest()
-        key = hashlib.sha256(json.dumps([hit.url, hit.title, raw_hash, self.settings.ollama_model, PROMPT_VERSION, PARSER_VERSION], ensure_ascii=False).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps([hit.url, hit.title, raw_hash, self.settings.ollama_model, EXTRACT_PROMPT_VERSION, PARSER_VERSION], ensure_ascii=False).encode()).hexdigest()
         entry = self.entries.get(key)
         if entry and monotonic() < entry[0]:
             self.entries.move_to_end(key)

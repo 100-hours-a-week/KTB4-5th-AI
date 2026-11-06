@@ -1,4 +1,4 @@
-# 냉장고 레시피 추천 설계 v20
+# 냉장고 레시피 추천 설계 v24
 
 정책은 `recipe-rerank-v20`, Worker 계약은 `recipe-grounded-v10`이다. 이번 v20은 FastAPI만 변경하며 기존 Worker v10과 호환된다. 원천별 맛 평가에는 기존 023 SQL이 별도로 필요하다. 기존 레시피 작업 / 결과 저장 테이블은 유지한다.
 
@@ -159,8 +159,36 @@ python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --a
 
 추천 후보가 이미 있으면 식품안전나라 / 웹 보충을 기다리지 않고 응답한 뒤 백그라운드에서 실행한다. 이때 `warnings`에 `RECIPE_SUPPLY_DEFERRED`가 포함되며 결과는 다음 요청부터 후보에 반영한다. 후보가 하나도 없을 때만 기존처럼 `RECIPE_SUPPLY_TIMEOUT_SECONDS`(기본 8초) 안에서 기다린다. 백그라운드 보충은 `RECIPE_SUPPLY_BACKGROUND_TIMEOUT_SECONDS`(기본 30초) 제한으로 프로세스당 하나만 실행하며, 실행 중이면 이번 보충은 건너뛴다. DB 저장이 승인되지 않은 웹 원천은 저장하지 않고 프로세스 메모리에서 1시간, 최대 200건만 재사용한다. 같은 조건의 추천은 결과 캐시(기본 5분)가 끝난 뒤 새 후보를 반영한다.
 
+### 앱 맛 태그
+
+앱은 화면 문구인 `매콤한` / `담백한` / `짭짤한` / `달콤한`을 그대로 `preferenceTags`로 보낸다. 이 값도 `매콤한거` 등과 같은 맛 태그로 처리해 원문 근거 검증과 사전 맛 평가를 적용한다.
+
 ### 보유 재료 연결과 요구르트 표기
 
 단위가 다르거나 원문 분량이 없어 양을 계산하지 못한 재료도 `inventoryUsage.allocations`에 `ingredientNo`와 `usedAmount=0`으로 연결하고 상태는 `UNRESOLVED`로 둔다. 연결이 없으면 백엔드가 보유 재료를 미보유로 표시하고 목록의 보유 / 임박 개수를 null로 반환한다. 차감량에는 사용하지 않는다.
 
 요구르트와 요거트는 같은 말의 표기 차이이므로 별칭으로 처리한다. 그릭요거트는 별도 재료로 유지한다.
+
+## v24 AI 상황 판단 / 요리 분류 / 날씨
+
+### 역할 분담
+- **레시피 정보(사전)**: Gemma가 원천 레시피마다 요리 종류 / 형태 / 먹는 온도 / 무게감 / 난이도 / 식사 목적 / 식감을 분류해 `recipe_ai.recipe_attributes`(024)에 저장한다. 서버 규칙은 원문과 정면으로 어긋나는 값(가열 단계 없는 HOT, 국물 없는 SOUP_STEW, 튀김·굽기 없는 CRISPY, 단맛 신호 없는 DESSERT, 단계 10개 초과의 EASY 등)만 UNKNOWN으로 되돌리고 값을 새로 정하지 않는다.
+- **추천 판단(요청 시)**: RANK 단계에서 Gemma가 날씨(`recommendationContext.weather`) / 계절 / 시간대 / 후보 `attributes`를 보고 순서와 이유 코드(`contextReasons`)를 고른다.
+- **서버 검증**: 이유 코드를 날씨 구간 / 강수 / 시간대 / 저장 속성과 대조해 맞는 코드만 남기고 서버 문구로 표시한다. 분류가 없는 후보는 원문 제목 / 조리 단계로만 보수적으로 확인한다.
+
+### 날씨
+- 기상청 단기예보 조회서비스(공공데이터포털) `getUltraSrtNcst`(기온 / 습도 / 풍속 / 강수)와 `getUltraSrtFcst`(하늘 상태)를 서울 격자(nx=60, ny=127)로 조회한다. 키는 `RECIPE_KMA_API_KEY`이며 인코딩 / 디코딩 키 모두 허용한다.
+- 체감온도는 기상청 식(10~4월 풍속, 5~9월 습구온도)을 쓴다.
+- 캐시: 관측 기준 시각(매시 정각, 45분 이후 사용) 단위. 새 기준 시각이 되면 첫 요청이 뒤에서 갱신을 시작하고 기존 값으로 바로 응답한다. 자료가 전혀 없을 때만 최대 1.5초 기다린다. 같은 기준 시각에서 실패하면 다시 호출하지 않는다. 6시간 넘은 자료는 쓰지 않는다. 날씨 때문에 추천이 실패하지 않는다.
+- 추천 결과 캐시 키에는 관측 시각 / 체감 구간 / 강수만 넣는다.
+
+### 다중 태그 판정
+맛 등 인용 검증 태그는 모두 일치해야 MATCHED다. 요리 종류 / 난이도 / 식사 목적 / 식감 태그는 요청 시점 인용으로 검증할 수 없으므로 저장 분류로만 판정하고, 요약 판정을 막지 않는 정렬 요소로 쓴다.
+
+### 실행 순서
+1. DB 소유자 권한으로 `database/migrations/024_recipe_attributes.sql` 적용
+2. GPU Worker와 FastAPI를 함께 배포(`PROMPT_VERSION=recipe-grounded-v11`, 버전이 다르면 AI 응답을 거부하고 규칙 추천으로 동작)
+3. `python -m app.recipes.attribute_backfill --limit 200 --after-id 0`을 `nextAfterId`로 이어 실행(`--source HANSIK_PRECISION`처럼 원천 지정 가능)
+4. 표본 검수: `python -m app.recipes.attribute_backfill --sample 100 --output /tmp/attribute-sample.csv` 후 `correct_*` 열에 정답을 적어 항목별 정확도를 잰다. 정확도가 낮은 항목은 프롬프트 / 규칙을 고친 뒤 `ATTRIBUTE_PROMPT_VERSION`을 올려 다시 분류한다.
+
+맛 평가(023)와 웹 추출 캐시는 단계별 버전(`PROFILE_PROMPT_VERSION`, `EXTRACT_PROMPT_VERSION`)을 따로 쓰므로 이번 RANK 프롬프트 변경으로 다시 만들 필요가 없다.

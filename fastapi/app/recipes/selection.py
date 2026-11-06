@@ -15,7 +15,9 @@ def preference_priority(row: dict) -> tuple[int, ...]:
         return ()
     evidence = {canonical(item.get("evidence") or item.get("tag") or "unspecified")
                 for item in row.get("preferenceAssessments", []) if item["status"] == "MATCHED"}
-    return ({"MATCHED": 0, "UNKNOWN": 1, "NOT_MATCHED": 2}[status], -len(evidence))
+    # 일치 근거가 같으면 불일치 태그(예: 요청 한식인데 양식)가 적은 후보를 앞에 둔다.
+    mismatched = sum(item["status"] == "NOT_MATCHED" for item in row.get("preferenceAssessments", []))
+    return ({"MATCHED": 0, "UNKNOWN": 1, "NOT_MATCHED": 2}[status], -len(evidence), mismatched)
 
 
 # 취향이 있으면 검증된 일치만 정식 추천한다. 미확인은 불일치로 바꾸지 않고 확인 후보로 분리한다.
@@ -72,7 +74,9 @@ def candidate_priority(row: dict, covered: set[str] | None = None) -> tuple[int 
     consumption = verified_consumption(row)
     consumption_key = (0, -consumption) if consumption is not None else (1, 0.0)
     quantity = 0 if row.get("quantityStatus") == "SUFFICIENT" else 1 if row.get("baseServings") is not None else 2
-    return (*preference[:1], *urgent, *preference[1:], urgent_role_priority(row), *marginal, *coverage, *consumption_key, shopping_band(row), len(row["missingIngredients"]),
+    # AI가 고르고 서버가 검증한 상황(날씨 / 시간대 / 계절) 적합 후보를 임박 활용 우선순위 다음에 앞에 둔다.
+    situation = row.get("_situationPriority", (1, 0))
+    return (*preference[:1], *urgent, *preference[1:], urgent_role_priority(row), *marginal, *situation, *coverage, *consumption_key, shopping_band(row), len(row["missingIngredients"]),
             quantity, row["_suitability"]["tier"], *row.get("_expiryDetail", ()))
 
 

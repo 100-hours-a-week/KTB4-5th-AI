@@ -17,7 +17,8 @@ from app.recipes.candidate_pool import representative_candidates
 from app.recipes.context import variation_key
 from app.recipes.meal_quality import frying_steps, taste_context, weak_spicy_basis
 from app.recipes.preferences import valid_preference_evidence
-from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, transient_failure
+from app.recipes.recipe_attributes import compact_attributes
+from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, SituationDecisionCache, transient_failure
 from app.recipes.retrieval import canonical, missing_named_ingredients
 from app.recipes.schemas import RecommendationRequest
 from app.recipes.selection import candidate_priority, select_recommendations
@@ -26,7 +27,7 @@ from app.recipes.taste_profiles import preference_decisions, uncertain_unmatched
 
 logger = logging.getLogger(__name__)
 AI_ERRORS = (AppError, httpx.HTTPError, TimeoutError, ValueError, TypeError)
-POLICY_VERSION = "recipe-rerank-v22"
+POLICY_VERSION = "recipe-rerank-v24"
 
 
 # 기존 내부 호출 경로를 보존하되 최종 선정 책임은 단일 모듈로 위임한다.
@@ -62,6 +63,10 @@ class MealRanker:
         self.circuit = RecipeCircuit()
         self.preference_cache_hits = 0
         self._cached_rows: dict[tuple[str, str], dict[str, str]] = {}
+        # 모델이 후보별로 고른 상황 이유 코드다. 서버 검증 전 값이며 그대로 사용자에게 보이지 않는다.
+        self.context_factors: dict[tuple[str, str], list[str]] = {}
+        self.situations = SituationDecisionCache()
+        self.situation_cache_hits = 0
 
     # 현재 평가 창 밖이라도 같은 원문 / 취향의 검증된 판정이 있으면 후보 풀에 적용한다.
     def hydrate(self, context: dict, rows: list[dict]) -> None:
@@ -141,12 +146,18 @@ class MealRanker:
         reused = bool(self.preference_cache_hits)
         # 평가 예산 밖 후보 때문에 같은 창을 반복 추론하지 않는다. 창 밖 후보는 기존 UNKNOWN 정책을 유지한다.
         fitted = shortlist
-        if tags and cached:
+        contextual = "recommendationContext" in context
+        if tags and cached or contextual:
             try:
                 _, fitted = pack_rank_input(context, shortlist, self.max_input_bytes)
             except ValueError:
                 fitted = []
-        all_cached = bool(tags and fitted and all((row["source"], row["sourceRecipeId"]) in cached for row in fitted))
+        preference_ready = not tags or all((row["source"], row["sourceRecipeId"]) in cached for row in fitted)
+        situation_keys = {(row["source"], row["sourceRecipeId"]): self.situations.key(row, context["recommendationContext"], self.expected_model,
+                                                                                    PROMPT_VERSION, POLICY_VERSION) for row in fitted} if contextual else {}
+        situation_cached = {identity: factors for identity, key in situation_keys.items() if (factors := self.situations.get(key)) is not None}
+        # 상황 판단이 필요한 요청은 취향 판정과 상황 판단이 모두 캐시돼 있을 때만 모델 호출을 생략한다.
+        all_cached = bool(fitted and preference_ready and (len(situation_cached) == len(fitted) if contextual else tags))
         if all_cached:
             self.preference_matches.clear()
             self.preference_evidence.clear()
@@ -159,8 +170,16 @@ class MealRanker:
             if len(fitted) < len(shortlist):
                 self.warnings.append("AI_INPUT_WINDOW_REDUCED")
             self.model = self.expected_model
+            self.context_factors = dict(situation_cached)
+            self.situation_cache_hits += len(situation_cached)
         else:
             selected = await self._rank(context, shortlist)
+            # 정상 응답이면 평가 창의 모든 후보에 대해 상황 판단을 저장한다. 이유가 없던 후보도 '해당 없음' 판단이다.
+            if selected is not None and contextual:
+                for row in selected:
+                    identity = (row["source"], row["sourceRecipeId"])
+                    if identity in situation_keys:
+                        self.situations.remember(situation_keys[identity], self.context_factors.get(identity, []))
         if selected is not None and not all_cached:
             for row in selected:
                 identity = (row["source"], row["sourceRecipeId"])
@@ -168,7 +187,9 @@ class MealRanker:
                 if row.get("tasteProfile") is None and uncertain:
                     self.rejected_preference_tags.setdefault(identity, set()).update(uncertain)
             for identity in self.evaluated_identities:
-                if identity in keys and identity not in self.rejected_preference_identities and identity not in self.rejected_preference_tags:
+                # 이미 캐시 / 저장 평가로 판정한 후보는 근거 선택지를 비워 보냈으므로 빈 결과로 덮어쓰지 않는다.
+                if (identity in keys and identity not in self._cached_rows and identity not in self.rejected_preference_identities
+                        and identity not in self.rejected_preference_tags):
                     cached[identity] = self.decisions.remember(keys[identity], self.preference_tag_evidence.get(identity, {}))
         for identity, evidence in cached.items():
             self.evaluated_identities.add(identity)
@@ -201,6 +222,7 @@ class MealRanker:
         self.rejected_preference_tags = {}
         self.rejected_preference_identities = set()
         self.evaluated_identities = set()
+        self.context_factors = {}
         self.unavailable = False
         self.model = None
         call_started = None
@@ -248,6 +270,11 @@ class MealRanker:
                 raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
             if not {item.candidateId for item in result.preferenceEvidence} <= set(matched_ids):
                 raise ValueError("INVALID_RECIPE_PREFERENCE_IDS")
+            if not {item.candidateId for item in result.contextReasons} <= wanted:
+                raise ValueError("INVALID_RECIPE_CONTEXT_REASON_IDS")
+            for item in result.contextReasons:
+                row = window[item.candidateId - 1]
+                self.context_factors.setdefault((row["source"], row["sourceRecipeId"]), list(dict.fromkeys(item.factors)))
             for identifier in matched_ids:
                 row = window[identifier - 1]
                 identity = (row["source"], row["sourceRecipeId"])
@@ -301,7 +328,9 @@ class MealRanker:
             self.unavailable = transient_failure(exc)
             if ticket is not None:
                 self.circuit.finish(ticket, self.unavailable)
-            allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION", "INVALID_RECIPE_PREFERENCE_IDS"}
+            self.context_factors.clear()
+            allowed = {"RECIPE_CONTEXT_TOO_LARGE", "RECIPE_MODEL_OR_SCHEMA_MISMATCH", "INVALID_RECIPE_RANK_PERMUTATION", "INVALID_RECIPE_PREFERENCE_IDS",
+                       "INVALID_RECIPE_CONTEXT_REASON_IDS"}
             code = str(exc) if type(exc) is ValueError and str(exc) in allowed else "TIME_BUDGET_EXCEEDED" if isinstance(exc, TimeoutError) else "REMOTE_OR_SCHEMA_ERROR"
             status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else exc.status_code if isinstance(exc, AppError) else None
             logger.warning("recipe_ai_fallback stage=RANK error_type=%s reason_code=%s transient=%s status=%s prompt=%s", type(exc).__name__, code, self.unavailable, status, PROMPT_VERSION)
@@ -441,6 +470,10 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
     for count in range(len(shortlist), 0, -1):
         window = shortlist[:count]
         payload = {**base, "candidates": compact_candidates(window, brief=True), "executionBudgetSeconds": 60.0}
+        for candidate, row in zip(payload["candidates"], window, strict=True):
+            attributes = compact_attributes(row.get("recipeAttributes"))
+            if attributes:
+                candidate["attributes"] = attributes
         if context.get("preferenceTags"):
             for candidate, row in zip(payload["candidates"], window, strict=True):
                 candidate["tasteContext"] = taste_context(row)

@@ -3,16 +3,16 @@ import hashlib
 import json
 import re
 
-from app.recipes.ai_contract import PROMPT_VERSION, TasteProfile
+from app.recipes.ai_contract import PROFILE_PROMPT_VERSION, TasteProfile
 from app.recipes.meal_quality import frying_steps, weak_spicy_basis
 from app.recipes.retrieval import canonical
 
 EVALUATION_VERSION = "recipe-taste-v1"
 KINDS = {"SPICY", "SWEET", "SALTY", "MILD", "PEPPERY"}
-TAG_KINDS = {"매운거":"SPICY", "매운맛":"SPICY", "매운음식":"SPICY", "매콤한거":"SPICY",
-             "단거":"SWEET", "단맛":"SWEET", "달콤한거":"SWEET", "달달한거":"SWEET",
-             "짠거":"SALTY", "짠맛":"SALTY", "짭짤한거":"SALTY", "짭짤한맛":"SALTY",
-             "담백한거":"MILD", "담백한맛":"MILD", "담백한음식":"MILD",
+TAG_KINDS = {"매운거":"SPICY", "매운맛":"SPICY", "매운음식":"SPICY", "매콤한":"SPICY", "매콤한거":"SPICY",
+             "단거":"SWEET", "단맛":"SWEET", "달콤한":"SWEET", "달콤한거":"SWEET", "달달한거":"SWEET",
+             "짠거":"SALTY", "짠맛":"SALTY", "짭짤한":"SALTY", "짭짤한거":"SALTY", "짭짤한맛":"SALTY",
+             "담백한":"MILD", "담백한거":"MILD", "담백한맛":"MILD", "담백한음식":"MILD",
              "칼칼한거":"PEPPERY", "칼칼한맛":"PEPPERY"}
 
 
@@ -32,7 +32,7 @@ def taste_signal(kind: str, text: str) -> bool:
 # 사용자 / 재고 / 취향과 독립적으로 원문과 모델 / 평가 버전을 구분한다.
 def profile_key(row: dict, model: str) -> str:
     source = {k: row.get(k) for k in ("source", "sourceRecipeId", "sourceRevision", "name", "baseServings", "ingredients", "steps")}
-    return hashlib.sha256(json.dumps([source, model, PROMPT_VERSION, EVALUATION_VERSION], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([source, model, PROFILE_PROMPT_VERSION, EVALUATION_VERSION], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 # 분량이 모호하면 숫자로 바꾸지 않는다. 모델에는 전체 원문과 원문 번호만 보낸다.

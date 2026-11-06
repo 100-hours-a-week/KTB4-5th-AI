@@ -3,11 +3,11 @@ import json
 import re
 import unicodedata
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.recipes.ai_contract import TasteProfile
+from app.recipes.ai_contract import RecipeAttributes, TasteProfile
 from app.schemas import Category
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
@@ -214,16 +214,20 @@ class RecommendedRecipe(RecipeSnapshot):
     tasteProfile: TasteProfile | None = None
     preferenceEvidence: str | None = None
     preferenceAssessments: list[PreferenceAssessment] = Field(default_factory=list)
+    # AI 사전 분류 요리 성격과, 서버가 검증한 AI 상황 판단 코드(WARM_FOR_COLD 등)다.
+    recipeAttributes: RecipeAttributes | None = None
+    contextFactors: list[str] = Field(default_factory=list)
     preparationNote: str = "원본 조리법을 확인하세요. 냉동 재료의 해동 조건은 원문·포장 기준을 확인하며 조리·해동시간을 별도 추정하지 않습니다."
 
 
 class RecommendationTrace(Contract):
-    policyVersion: str = "recipe-rerank-v19"
+    policyVersion: str = "recipe-rerank-v24"
     model: str | None = None
     promptVersion: str | None = None
     aiCalls: int = 0
     tasteProfileCount: int = 0
     preferenceDecisionCacheHits: int = 0
+    situationDecisionCacheHits: int = 0
     recommendationCacheHit: bool = False
     candidateCoverage: dict[str, dict[str, int]] = Field(default_factory=dict)
     searchCount: int = 0
@@ -255,7 +259,8 @@ class RecommendationResponse(Contract):
     warnings: list[str] = Field(default_factory=list)
     trace: RecommendationTrace = Field(default_factory=RecommendationTrace)
     preferenceTags: list[str] = Field(default_factory=list)
-    context: dict[str, str] = Field(default_factory=dict)
+    # 계절 / 식사 시간대 / 날씨(weather 객체, 조회 실패 시 없음) 등 추천 시점 정보다.
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 JobStatus = Literal["QUEUED", "PROCESSING", "COMPLETED", "FAILED"]

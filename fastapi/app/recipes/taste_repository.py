@@ -5,7 +5,7 @@ import logging
 import asyncpg
 
 from app.errors import DependencyUnavailable
-from app.recipes.ai_contract import PROMPT_VERSION, TasteProfile
+from app.recipes.ai_contract import PROFILE_PROMPT_VERSION, TasteProfile
 from app.recipes.repository import RecipeRepository
 from app.recipes.schemas import Recipe
 from app.recipes.taste_profiles import EVALUATION_VERSION, profile_key, validate_profile
@@ -53,5 +53,5 @@ class TasteProfileRepository:
                 return False
             await connection.execute("""INSERT INTO recipe_ai.taste_profiles(recipe_id,profile_key,model_name,prompt_version,evaluation_version,profile)
                                      VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(profile_key) DO UPDATE SET profile=EXCLUDED.profile,updated_at=now()""",
-                                     current["id"], key, model, PROMPT_VERSION, EVALUATION_VERSION, verified.model_dump_json())
+                                     current["id"], key, model, PROFILE_PROMPT_VERSION, EVALUATION_VERSION, verified.model_dump_json())
         return True

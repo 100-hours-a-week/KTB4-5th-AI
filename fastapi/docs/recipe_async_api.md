@@ -125,7 +125,7 @@ DB 사용 환경은 022_recipe_recommendation_results.sql 적용이 필요하다
 ]
 ```
 
-MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch=MATCHED는 태그 하나 이상 충족을 뜻한다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
+MATCHED는 해당 태그의 모델 주장/원문 검증 통과, NOT_MATCHED는 평가했으나 유효한 적합 근거 없음, UNKNOWN은 미평가/실패/근거 거부다. 요약 preferenceMatch는 v24부터 다음 규칙으로 합친다(이전에는 태그 하나만 맞아도 MATCHED). 맛 등 원문 인용으로 검증하는 태그는 **모두** MATCHED여야 MATCHED이고, 하나라도 NOT_MATCHED면 NOT_MATCHED, 그 밖에는 UNKNOWN이다. 요리 종류(한식/양식/중식/일식) / 난이도(쉬움/중간/어려움) / 식사 목적(간식/디저트/한끼/간편한 식사) / 식감(바삭/쫄깃/부드러운) 태그는 저장된 AI 요리 분류(`recipeAttributes`)로만 판정하며 evidence는 `AI 레시피 분류: 한식` 형식이다. 이 태그는 요약 판정을 막지 않고 같은 상태 안에서 불일치가 적은 후보를 앞에 둔다. 속성 태그만 요청하면 하나 이상 MATCHED이고 NOT_MATCHED가 없을 때 MATCHED다. 원문에 고춧가루가 있어도 매운 강도까지 확정하지 않는다. 취향이 있으면 MATCHED → UNKNOWN → NOT_MATCHED 순으로 비교하고 같은 상태에서 임박 활용을 우선합니다. 취향 일치 + 임박 활용이 최우선이며 취향 일치 비임박 후보도 취향 불일치 임박 후보보다 앞섭니다. 서로 다른 원문 근거 수, 새로운 임박 주재료 / 전체 임박 재료 활용, 부족 식재료 5종 이내와 분량 확인 상태를 뒤이어 비교합니다. 최종 순위는 FastAPI의 단일 선정 단계에서 결정하고 Gemma는 취향 원문 근거를 평가합니다.
 
 ## 판정 재사용/오류 추적
 
@@ -201,6 +201,23 @@ requiredAmount = amountValue × targetServings ÷ (baseServings 또는 1)
 ### 한식 정밀레시피 표시 필드
 
 `sourceAttribution`(string / null)은 출처와 공공누리 표시, `cookingNotes`(string 배열, 기본 `[]`)는 인덕션 불 세기 용어 같은 공통 안내다. 두 값은 `steps`에서 분리되어 전달되므로 백엔드는 조리 단계와 별도로 저장하고 표시한다. 다른 원천은 `null`과 `[]`일 수 있다.
+
+### 날씨 / 시간대 상황 판단과 요리 분류 (v24)
+
+- `context.weather`: 추천 시점의 서울 날씨(기상청 초단기실황, 정시 자료를 매시 45분 이후 반영). 조회 실패 / 키 미설정이면 필드가 없고 `WEATHER_UNAVAILABLE` 경고가 붙는다(키 미설정은 경고 없음). 사용자 위치는 수집하지 않는다.
+
+```json
+"weather": {"source": "KMA", "region": "SEOUL", "observedAt": "2026-11-06T12:00:00+09:00", "temperatureC": 8.5, "feelsLikeC": 5.8,
+            "humidity": 33.0, "windSpeedMs": 4.8, "precipitation": "NONE", "rainfallMm1h": 0.0, "sky": "CLEAR",
+            "temperatureBand": "CHILLY", "stale": false}
+```
+
+  `precipitation`: NONE/RAIN/SLEET/SNOW, `sky`: CLEAR/PARTLY_CLOUDY/OVERCAST/null, `temperatureBand`(체감온도 기준): COLD(≤5)/CHILLY(≤12)/MILD(≤22)/WARM(≤27)/HOT. `stale=true`는 2시간 넘은 이전 자료(최대 6시간)를 쓴 경우다.
+- 항목 `recipeAttributes`: AI가 미리 분류한 요리 성격. 분류 전이면 null이다. `cuisine`(KOREAN/WESTERN/CHINESE/JAPANESE/OTHER/UNKNOWN), `dishForm`(SOUP_STEW/RICE/NOODLE/SIDE_DISH/MAIN_DISH/SALAD/BAKED/DESSERT/DRINK/OTHER/UNKNOWN), `servingTemperature`(HOT/COLD/ROOM/UNKNOWN), `heaviness`(LIGHT/MEDIUM/HEAVY/UNKNOWN), `difficulty`(EASY/MEDIUM/HARD/UNKNOWN), `mealPurposes`(MEAL/QUICK_MEAL/SNACK/DESSERT 목록), `textures`(CRISPY/CHEWY/SOFT 목록), `limitations`.
+- 항목 `contextFactors`: AI가 고르고 서버가 날씨 / 시간대 / 계절 / 요리 분류와 대조해 확인한 이유 코드. `WARM_FOR_COLD`, `SOUP_FOR_RAIN`, `LIGHT_FOR_HEAT`, `MEAL_TIME_FIT`, `SEASON_FIT`, `PREFERENCE_FIT`, `USES_EXPIRING`, `LOW_SHOPPING`. 상황 코드가 있으면 `reason` 끝에 `AI 상황 판단: 체감 5.8°C로 쌀쌀해 따뜻하게 먹는 요리, 저녁 한 끼로 알맞은 요리입니다.` 형식의 문장이 붙는다. AI의 자유 문장은 노출하지 않는다.
+- 정렬: 취향 상태와 임박 주재료 활용 우선순위는 그대로이고, 그다음에 확인된 상황 코드가 있는 후보를 앞에 둔다.
+- 경고: `AI_SITUATION_JUDGEMENT_USED`(확인된 상황 판단이 반영됨), `AI_CONTEXT_REASON_REJECTED`(모델 이유 일부가 사실과 달라 버림), `RECIPE_ATTRIBUTE_STORE_UNAVAILABLE`(024 미적용 등).
+- `trace.situationDecisionCacheHits`: 같은 레시피 / 날씨 구간 / 강수 / 계절 / 시간대의 상황 판단을 재사용한 수(프로세스 메모리, 1시간). 취향 판정과 상황 판단이 모두 재사용되면 aiCalls=0일 수 있다.
 
 ### 결과 조회 JSON 예시
 

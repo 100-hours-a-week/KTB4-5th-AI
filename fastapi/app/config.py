@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     recipe_food_safety_storage_approved: bool = False
     recipe_tavily_api_key: str | None = Field(default=None, repr=False, validation_alias=AliasChoices("TAVILY_API_KEY", "RECIPE_TAVILY_API_KEY", "recipe_tavily_api_key"))
     recipe_tavily_max_attempts: int = Field(default=1, ge=1, le=2)
+    # 기상청 단기예보 조회서비스 키(공공데이터포털). 인코딩 / 디코딩 키 모두 허용한다. 없으면 날씨 없이 추천한다.
+    recipe_kma_api_key: str | None = Field(default=None, repr=False)
+    recipe_weather_enabled: bool = True
+    recipe_attributes_enabled: bool = True
+    # 사용자 위치를 수집하지 않으므로 서울 한 격자(종로구 기준 nx=60, ny=127)만 조회한다.
+    recipe_weather_region: str = "SEOUL"
+    recipe_weather_grid_nx: int = Field(default=60, ge=1, le=200)
+    recipe_weather_grid_ny: int = Field(default=127, ge=1, le=200)
+    recipe_weather_timeout_seconds: float = Field(default=3, ge=0.5, le=10)
+    recipe_weather_wait_seconds: float = Field(default=1.5, ge=0.1, le=5)
+    recipe_weather_max_stale_hours: float = Field(default=6, ge=1, le=24)
     recipe_tavily_approved_domains: list[str] = Field(default_factory=list, max_length=20)
 
     # 프로토콜·경로·와일드카드·내부 주소를 승인 호스트에 섞지 못하게 한다.

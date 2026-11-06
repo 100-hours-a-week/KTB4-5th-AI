@@ -12,15 +12,18 @@ from app.errors import DependencyUnavailable
 from app.logging.recipe_trace import recipe_trace
 from app.recipes.ai import RecipeReasoner
 from app.recipes.ai_contract import PROMPT_VERSION, TasteProfile
+from app.recipes.attribute_repository import RecipeAttributeRepository
 from app.recipes.candidate_pool import coverage_counts, representative_candidates
 from app.recipes.context import recommendation_context
+from app.recipes.context_reasons import situation_priority, situation_sentence, verify_factors
 from app.recipes.diagnostics import candidate_diagnostics
 from app.recipes.evaluation import compare_rankings
 from app.recipes.food_safety import FoodSafetyProvider
 from app.recipes.planning import POLICY_VERSION, MealRanker, build_baseline, vary_baseline
-from app.recipes.preferences import preference_search_focus, preference_shortlist
+from app.recipes.preferences import combine_preference_status, preference_search_focus, preference_shortlist
 from app.recipes.quantities import assess_quantities
-from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit
+from app.recipes.recipe_attributes import attribute_decisions, attribute_tag
+from app.recipes.reliability import PreferenceDecisionCache, RecipeCircuit, SituationDecisionCache
 from app.recipes.replenishment import RecipeSupply
 from app.recipes.repository import RecipeRepository
 from app.recipes.result_cache import RecipeResultCache, recommendation_key
@@ -31,6 +34,7 @@ from app.recipes.stock_names import stock_ingredient
 from app.recipes.suitability import DEFAULT_PANTRY_NAMES, WATER_NAMES, assess_suitability, ingredient_role
 from app.recipes.taste_profiles import preference_decisions
 from app.recipes.taste_repository import TasteProfileRepository
+from app.recipes.weather import WeatherService
 from app.recipes.web_provider import WebRecipeProvider
 
 logger = logging.getLogger(__name__)
@@ -46,9 +50,12 @@ class RecipeService:
         self._ai_slots = asyncio.Semaphore(2)
         self._ai_circuit = RecipeCircuit()
         self._preference_decisions = PreferenceDecisionCache()
+        self._situation_decisions = SituationDecisionCache()
         self.repository = repository or RecipeRepository(settings)
         self.provider = provider or FoodSafetyProvider(settings)
         self.taste_profiles = TasteProfileRepository(self.repository)
+        self.attributes = RecipeAttributeRepository(self.repository)
+        self.weather = WeatherService(settings)
         self.web_provider = WebRecipeProvider(settings, reasoner=self.reasoner)
         self.cache = RecipeResultCache(settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
         self._deferred_supply: set[asyncio.Task] = set()
@@ -97,7 +104,9 @@ class RecipeService:
         excluded = sorted({normalize(name) for name in request.excludedIngredientNames if normalize(name)})
         pantry = sorted({canonical(name) for name in [*DEFAULT_PANTRY_NAMES, *request.pantryIngredientNames]
                          if not is_excluded(name, excluded) and ingredient_role("", name)[0] == "SEASONING"})
-        key = recommendation_key(request, self.settings, POLICY_VERSION)
+        # 날씨는 기준 시각 단위 캐시에서 읽는다. 실패하면 None이며 계절 / 시간대만으로 추천한다.
+        weather = await self.weather.current()
+        key = recommendation_key(request, self.settings, POLICY_VERSION, weather)
         cache_started = monotonic()
 
         # 캐시 미스 시 DB를 우선 조회하고 부족하면 승인된 원천을 최대 한 번 보충한다.
@@ -120,12 +129,16 @@ class RecipeService:
             query_names = query_variants(original_names)
             expiring = {canonical(item.name) for item in inventory if 0 <= (item.expirationDate - today).days <= 3}
             ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model, self.settings.recipe_ai_input_max_bytes)
-            ranker.decisions, ranker.circuit = self._preference_decisions, self._ai_circuit
+            ranker.decisions, ranker.circuit, ranker.situations = self._preference_decisions, self._ai_circuit, self._situation_decisions
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit, "preferenceTags": request.preferenceTags,
                        "recommendationContext": recommendation_context(request.requestId if not request.preferenceTags else key), "seasoningPolicy": "IGNORE_FOR_SHOPPING_KEEP_SOURCE"}
             context["recommendationContext"]["personalizationMode"] = "PREFERENCE" if request.preferenceTags else "CONTEXT_RANDOM"
+            if weather is not None:
+                context["recommendationContext"]["weather"] = weather
+            elif self.weather.enabled:
+                ranker.warnings.append("WEATHER_UNAVAILABLE")
             context["expiryPolicy"] = {"urgentWithinDays": 3, "expiringIngredientIds": [item.ingredientId for item in inventory if 0 <= (item.expirationDate - today).days <= 3]}
             if inventory and not self.settings.recipe_ai_enabled:
                 ranker.warnings.append("AI_DISABLED")
@@ -189,8 +202,24 @@ class RecipeService:
                     ranker.warnings.append("TASTE_PROFILE_STORE_UNAVAILABLE")
                     logger.warning("recipe_taste_profile_store_unavailable")
 
+            # 요리 성격 분류는 취향 / 상황 판단 모두에 쓴다. 미분류 후보는 원문 기반 보수 판정만 받는다.
+            async def attach_attributes(rows: list[dict]) -> None:
+                if not self.settings.recipe_ai_enabled or not self.settings.recipe_attributes_enabled:
+                    return
+                try:
+                    async with asyncio.timeout(max(0.01, min(2, deadline - monotonic()))):
+                        found = await self.attributes.load_many([row for row in rows if "recipeAttributes" not in row], self.settings.ollama_model)
+                    for row in rows:
+                        value = found.get((row["source"], row["sourceRecipeId"]))
+                        if value is not None:
+                            row["recipeAttributes"] = value.model_dump(mode="json")
+                except (DependencyUnavailable, TimeoutError):
+                    ranker.warnings.append("RECIPE_ATTRIBUTE_STORE_UNAVAILABLE")
+                    logger.warning("recipe_attribute_store_unavailable")
+
             ranked = [score_candidate(recipe) for recipe in candidates]
             await attach_profiles(ranked)
+            await attach_attributes(ranked)
             ranked.sort(key=lambda item: (-item["score"], item["source"], item["sourceRecipeId"]))
             baseline = build_baseline(ranked, matched_request)
             validation_ms = (monotonic() - validation_started) * 1000
@@ -221,6 +250,7 @@ class RecipeService:
                         added = True
                 ranked = list(merged.values())
                 await attach_profiles(ranked)
+                await attach_attributes(ranked)
                 baseline = build_baseline(ranked, matched_request)
                 if supplied.food_safety_searched:
                     source += "_AND_FOOD_SAFETY_KOREA"
@@ -288,14 +318,37 @@ class RecipeService:
                     if status is not None:
                         assessment["status"] = status
                         assessment["evidence"] = tag_evidence.get(assessment["tag"]) if status == "MATCHED" else None
+                # 요리 종류 / 난이도 / 식사 목적 / 식감은 저장된 AI 분류로만 판정한다. 분류가 없으면 미확인이다.
+                classified = attribute_decisions(row["recipeAttributes"], request.preferenceTags) if row.get("recipeAttributes") else {}
+                for assessment in row["preferenceAssessments"]:
+                    if attribute_tag(assessment["tag"]):
+                        status, evidence = classified.get(assessment["tag"], ("UNKNOWN", None))
+                        assessment["status"], assessment["evidence"] = status, evidence
+                        tag_evidence.pop(assessment["tag"], None)
+                        if status == "MATCHED" and evidence:
+                            tag_evidence[assessment["tag"]] = evidence
                 if request.preferenceTags:
-                    statuses = [item["status"] for item in row["preferenceAssessments"]]
-                    row["preferenceMatch"] = "MATCHED" if "MATCHED" in statuses else "UNKNOWN" if "UNKNOWN" in statuses else "NOT_MATCHED"
-                if row["preferenceMatch"] == "MATCHED":
+                    # 여러 태그 중 하나만 맞아도 일치로 보지 않는다. 맛 등 인용 검증 태그는 모두 일치해야 한다.
+                    row["preferenceMatch"] = combine_preference_status({item["tag"]: item["status"] for item in row["preferenceAssessments"]})
+                if row["preferenceMatch"] == "MATCHED" and tag_evidence:
                     row["preferenceEvidence"] = next(iter(tag_evidence.values()))
                     row["reason"] += f" AI가 요청 취향 중 {', '.join(tag_evidence)}에 대한 원문 근거를 확인했습니다."
                 elif row["preferenceMatch"] == "NOT_MATCHED":
                     row["reason"] += " 요청 취향에 맞는 원문 근거가 확인되지 않아 취향 일치 후보보다 후순위입니다."
+            # 모델이 고른 상황 이유를 날씨 / 시간대 / 계절 / 저장 속성과 대조한다. 맞지 않는 이유는 버리고 문구에 쓰지 않는다.
+            situation = context["recommendationContext"]
+            for row in [*baseline, *confirmations]:
+                verified, rejected = verify_factors(row, ranker.context_factors.get((row["source"], row["sourceRecipeId"]), []), situation)
+                row["contextFactors"] = verified
+                row["_situationPriority"] = situation_priority(verified)
+                sentence = situation_sentence(verified, situation)
+                if sentence:
+                    row["reason"] += " " + sentence
+                if rejected:
+                    ranker.warnings.append("AI_CONTEXT_REASON_REJECTED")
+                    logger.info("recipe_context_reason_rejected factors=%s", ",".join(rejected))
+            if any(row["contextFactors"] for row in baseline):
+                ranker.warnings.append("AI_SITUATION_JUDGEMENT_USED")
             if request.preferenceTags and len(baseline) > len(evaluated):
                 ranker.warnings.append("PREFERENCE_EVALUATED_CANDIDATE_WINDOW")
             if request.preferenceTags and not any(row.get("preferenceMatch") == "MATCHED" for row in baseline):
@@ -386,6 +439,7 @@ class RecipeService:
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
                                                  "tasteProfileCount": used_profiles,
                                                  "preferenceDecisionCacheHits": ranker.preference_cache_hits,
+                                                 "situationDecisionCacheHits": ranker.situation_cache_hits,
                                                  "aiCalls": ranker.calls + extraction_calls, "searchCount": searches, "candidateCount": len(ranked),
                                                   "externalSearchCount": int(external_searched), "webSearchCount": web_searches,
                                                   "webDiscoveredCount": sum(report.discovered for report in web_reports),
@@ -400,7 +454,7 @@ class RecipeService:
         if cached:
             result.trace.recommendationCacheHit = True
             for field in ("aiCalls", "searchCount", "externalSearchCount", "webSearchCount", "webExtractionCalls", "webDiscoveredCount",
-                          "aiCandidateCount", "aiInputBytes", "preferenceDecisionCacheHits", "webSearchCacheHits", "webExtractionCacheHits"):
+                          "aiCandidateCount", "aiInputBytes", "preferenceDecisionCacheHits", "situationDecisionCacheHits", "webSearchCacheHits", "webExtractionCacheHits"):
                 setattr(result.trace, field, 0)
             result.trace.timingsMs = {"recommendationMs": round((monotonic() - cache_started) * 1000, 3)}
             result.warnings = list(dict.fromkeys([*result.warnings, "RECOMMENDATION_SNAPSHOT_REUSED"]))
@@ -416,5 +470,6 @@ class RecipeService:
         for task in list(self._deferred_supply):
             task.cancel()
         await asyncio.gather(*self._deferred_supply, return_exceptions=True)
+        await self.weather.close()
         await self.repository.close()
         await self.reasoner.close()

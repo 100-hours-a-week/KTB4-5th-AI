@@ -99,3 +99,37 @@ class PreferenceDecisionCache:
         while len(self.entries) > self.max_size:
             self.entries.popitem(last=False)
         return dict(evidence)
+
+
+class SituationDecisionCache:
+    # 레시피 원문 / 요리 분류 / 날씨 구간 / 계절 / 시간대가 같으면 모델의 상황 판단을 사용자 간에 재사용한다.
+    # 사용자별 이유(취향 / 임박 / 구매)는 저장하지 않고 요청마다 서버가 다시 검증한다.
+    PERSONAL = {"PREFERENCE_FIT", "USES_EXPIRING", "LOW_SHOPPING"}
+
+    def __init__(self, max_size: int = 2000, ttl: float = 3600) -> None:
+        self.max_size, self.ttl = max_size, ttl
+        self.entries: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
+
+    def key(self, row: dict, context: dict, model: str, prompt: str, policy: str) -> str:
+        weather = context.get("weather") or {}
+        snapshot = [row["source"], row["sourceRecipeId"], row.get("sourceRevision"), row["name"], row["ingredients"], row["steps"],
+                    row.get("recipeAttributes"), weather.get("temperatureBand"), weather.get("precipitation"),
+                    context.get("season"), context.get("mealTime"), model, prompt, policy]
+        return hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    # 빈 목록도 '특별히 맞는 상황 없음' 판단이다. None은 캐시 미스다.
+    def get(self, key: str) -> list[str] | None:
+        entry = self.entries.get(key)
+        if entry is None:
+            return None
+        if monotonic() - entry[0] >= self.ttl:
+            self.entries.pop(key, None)
+            return None
+        self.entries.move_to_end(key)
+        return list(entry[1])
+
+    def remember(self, key: str, factors: list[str]) -> None:
+        self.entries[key] = (monotonic(), [factor for factor in factors if factor not in self.PERSONAL])
+        self.entries.move_to_end(key)
+        while len(self.entries) > self.max_size:
+            self.entries.popitem(last=False)
