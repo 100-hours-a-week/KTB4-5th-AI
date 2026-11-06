@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     callback_timeout_seconds: float = Field(default=5.0, gt=0)
     callback_max_attempts: int = Field(default=3, ge=1, le=10)
 
+    kafka_enabled: bool = True
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_env: str = Field(default="local", min_length=1)
+    kafka_max_poll_interval_ms: int = Field(default=300_000, ge=10_000)
+    kafka_retry_delay_seconds: float = Field(default=5, ge=1, le=60)
+    kafka_shutdown_timeout_seconds: float = Field(default=10, gt=0, le=60)
+
     # 응답 modelTrace에 기록하는 버전 정보. 모델 자체는 GPU Worker에서 실행되므로 Worker 구성이
     # 바뀌면 이 값들도 함께 맞춘다.
     pipeline_version: str = "receipt-analysis-0.1.0"
