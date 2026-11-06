@@ -81,7 +81,7 @@ ACK 후 offset 커밋 전 장애에서 재전달되면 새 analysisId와 결과�
 
 ## 추천 요청과 완료
 
-`RECOMMENDATION_KAFKA_ENABLED=true`일 때만 추천 consumer를 시작한다. `KAFKA_ENV`와
+추천 consumer는 기본적으로 시작한다. 준비 중인 환경에서는 `RECOMMENDATION_KAFKA_ENABLED=false`로 설정한다. `KAFKA_ENV`와
 `KAFKA_BOOTSTRAP_SERVERS`는 공통 Kafka 설정을 사용한다. 시작 전에
 `${KAFKA_ENV}.dameokja.recommendation.requested.v1`과
 `${KAFKA_ENV}.dameokja.recommendation.completed.v1` 토픽,
