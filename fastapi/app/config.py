@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     callback_max_attempts: int = Field(default=3, ge=1, le=10)
 
     kafka_enabled: bool = True
+    recommendation_kafka_enabled: bool = False
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_env: str = Field(default="local", min_length=1)
     kafka_max_poll_interval_ms: int = Field(default=300_000, ge=10_000)

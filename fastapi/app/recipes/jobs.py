@@ -30,6 +30,8 @@ class RecipeJobs:
         self.tasks: list[asyncio.Task] = []
         self.lock = asyncio.Lock()
         self.accepting = False
+        self.completion_waiters: dict[str, set[asyncio.Future[RecipeJobView]]] = {}
+        self.kafka_only_jobs: set[str] = set()
 
     # 앱 수명 동안 지정된 수의 레시피 소비자만 실행한다.
     async def start(self) -> None:
@@ -70,8 +72,8 @@ class RecipeJobs:
         ACTIVE.set(0)
 
     # requestId/본문 해시로 멱등 접수한다. 큐 100건 초과나 저장소 포화 시 429를 반환한다.
-    async def submit(self, body: RecommendationRequest) -> RecipeJobAccepted:
-        digest = hashlib.sha256(body.model_dump_json(exclude={"requestId"}).encode()).hexdigest()
+    async def submit(self, body: RecommendationRequest, *, kafka_delivery: bool = False) -> RecipeJobAccepted:
+        digest = self._request_digest(body)
         async with self.lock:
             if not self.accepting:
                 raise AppError("RECIPE_NOT_READY", "레시피 작업을 접수할 수 없는 상태입니다.", 503, True, 5000)
@@ -82,6 +84,8 @@ class RecipeJobs:
                 if saved[0] != digest:
                     raise IdempotencyConflict()
                 REQUESTS.labels("idempotent").inc()
+                if not kafka_delivery:
+                    self.kafka_only_jobs.discard(saved[1].jobId)
                 return self._accepted(saved[1])
             if self.queue.full() or len(self.records) >= self.settings.recipe_result_max_entries:
                 REQUESTS.labels("queue_full").inc()
@@ -90,11 +94,47 @@ class RecipeJobs:
                                  status="QUEUED", submittedAt=datetime.now(UTC))
             self.records[view.jobId] = (digest, body.model_copy(deep=True), view)
             self.by_request[body.requestId] = view.jobId
+            if kafka_delivery:
+                self.kafka_only_jobs.add(view.jobId)
             self.queue.put_nowait(view.jobId)
             QUEUE.set(self.queue.qsize())
             REQUESTS.labels("accepted").inc()
             logger.info("recipe.job.queued job_id=%s request_id=%s user_id=%d refrigerator_id=%d queue_size=%d", view.jobId, body.requestId, body.userId, body.refrigeratorId, self.queue.qsize())
             return self._accepted(view)
+
+    async def submit_and_wait(self, body: RecommendationRequest) -> RecipeJobView:
+        history = self.history
+        if history is None:
+            raise RuntimeError("Kafka 추천 완료를 저장할 이력이 설정되지 않았습니다")
+        accepted = await self.submit(body, kafka_delivery=True)
+        current = self.records.get(accepted.jobId)
+        view = current[2] if current else await self.get(accepted.jobId)
+        if view.completedAt is None:
+            view = await self._wait_for_completion(accepted.jobId)
+
+        digest = self._request_digest(body)
+        saved = await history.by_request(body.requestId)
+        if saved:
+            if saved[0] != digest:
+                raise IdempotencyConflict()
+            return saved[1]
+        await history.save(digest, view)
+        return view
+
+    async def _wait_for_completion(self, job_id: str) -> RecipeJobView:
+        waiter: asyncio.Future[RecipeJobView] = asyncio.get_running_loop().create_future()
+        waiters = self.completion_waiters.setdefault(job_id, set())
+        waiters.add(waiter)
+        try:
+            return await waiter
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                self.completion_waiters.pop(job_id, None)
+
+    @staticmethod
+    def _request_digest(body: RecommendationRequest) -> str:
+        return hashlib.sha256(body.model_dump_json(exclude={"requestId"}).encode()).hexdigest()
 
     # 메모리 또는 영속 완료 이력에서 결과를 반환한다. 없어졌다면 레시피 전용 404다.
     async def get(self, job_id: str) -> RecipeJobView:
@@ -142,6 +182,12 @@ class RecipeJobs:
     # 저장/콜백 오류는 결과 자체를 실패로 뒤집거나 다음 작업 소비를 중단시키지 않는다.
     async def _finish(self, digest: str, view: RecipeJobView) -> None:
         logger.info("recipe.job.result job_id=%s status=%s error_code=%s", view.jobId, view.status, (view.error or {}).get("code"))
+        for waiter in self.completion_waiters.pop(view.jobId, set()):
+            if not waiter.done():
+                waiter.set_result(view.model_copy(deep=True))
+        if view.jobId in self.kafka_only_jobs:
+            self.kafka_only_jobs.remove(view.jobId)
+            return
         if self.history:
             try:
                 await self.history.save(digest, view)
