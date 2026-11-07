@@ -232,3 +232,5 @@ dev Pod(RTX A5000, `gemma4:e2b` Q4_K_M, num_ctx 32768, 100% GPU)에서 측정했
 - 취향 웹 보충 뒤 재판정은 새로 들어온 레시피만 보낸다. 기존 후보 판정은 판정 캐시에서 복원한다.
 - 대체 추천(NOT_FOUND)의 날씨 순서는 무취향 요청이 남긴 상황 캐시가 있을 때만 반영된다.
 - Worker는 `contextReasonsWanted`가 없으면 기존처럼 상황 이유를 받는다. 이번 변경은 FastAPI와 Worker를 함께 배포해야 효과가 난다. 순서는 FastAPI 먼저.
+- **원인 확인(2026-11-07 밤)**: Pod의 CPU 할당은 약 7.6개(`cpu.cfs_quota_us=765000`)인데 컨테이너 안에서는 96개로 보여 `llama-server`가 스레드 151개로 실행됐다. 할당 초과로 CPU 제한이 반복돼(`nr_throttled` 895회) 생성 속도가 16~52토큰/초로 흔들렸고, 같은 RANK 요청이 6초 성공 / 19초 시간 초과로 갈렸다. 같은 Pod에서 `num_thread=6`으로 바꾸면 JSON 스키마 출력 생성이 167~175토큰/초(기본 33~45)로 약 4~5배 빨라졌다.
+- **조치**: Worker `start.sh`가 cgroup 할당량 - 1(최소 1)을 `OLLAMA_NUM_THREAD`로 내보내고, 예열 / 레시피 / 이미지 분석의 모든 Ollama 호출이 `ollama_runtime_options()`로 같은 `num_ctx` / `num_thread`를 보낸다. 값이 호출마다 다르면 Ollama가 모델을 다시 적재한다(실측 약 22초). 수동으로 정하려면 `OLLAMA_NUM_THREAD` 환경 변수를 넣는다.

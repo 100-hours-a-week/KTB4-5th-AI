@@ -155,6 +155,10 @@ class Settings(BaseSettings):
     ollama_keep_alive: str = "12h"
     # 같은 모델의 워밍업 / 사진 / 레시피가 다른 context로 실행기를 재생성하지 않게 한다.
     ollama_num_ctx: int = Field(default=32768, ge=8192, le=32768)
+    # Ollama 실행 스레드 수. 컨테이너 CPU 할당량보다 많은 스레드는 CPU 제한(throttling)으로 생성 속도를 4~5배 떨어뜨린다
+    # (RunPod A5000 실측: 할당 7.6 CPU에서 기본 151스레드 33~45토큰/초, 6스레드 167~175토큰/초). start.sh가 할당량에 맞춰 넣는다.
+    # 모든 호출이 같은 값을 써야 한다. 값이 바뀌면 Ollama가 모델을 다시 적재한다(약 20초).
+    ollama_num_thread: int | None = Field(default=None, ge=1, le=256)
 
     database_url: str | None = None
     database_pool_max_size: int = Field(default=5, ge=1, le=50)
@@ -197,3 +201,11 @@ class Settings(BaseSettings):
 # 환경변수와 .env를 읽은 Settings를 프로세스 내 캐시하여 반환한다.
 def get_settings() -> Settings:
     return Settings()
+
+
+# 모든 Ollama 호출에 같은 실행 옵션을 넣는다. 호출마다 값이 다르면 모델 재적재가 일어난다.
+def ollama_runtime_options(settings: "Settings") -> dict[str, int]:
+    options = {"num_ctx": settings.ollama_num_ctx}
+    if settings.ollama_num_thread:
+        options["num_thread"] = settings.ollama_num_thread
+    return options

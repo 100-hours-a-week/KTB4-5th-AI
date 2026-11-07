@@ -37,6 +37,29 @@ if (( OLLAMA_NUM_CTX < 8192 || OLLAMA_NUM_CTX > 32768 )); then
     echo "OLLAMA_NUM_CTX는 8192~32768 범위여야 합니다." >&2
     exit 1
 fi
+# 컨테이너 CPU 할당량(cgroup)에 맞춰 Ollama 스레드 수를 정한다. 컨테이너 안에서는 호스트 CPU(예: 96개)가 보여
+# 기본 스레드가 할당량(예: 7.6 CPU)을 크게 넘고, CPU 제한으로 생성 속도가 4~5배 느려진다. 할당량 - 1(최소 1)을 쓴다.
+container_cpu_threads() {
+    local quota="" period=""
+    if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+        read -r quota period < /sys/fs/cgroup/cpu.max
+    elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us && -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]]; then
+        quota="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"
+        period="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
+    fi
+    if [[ "$quota" =~ ^[0-9]+$ && "$period" =~ ^[0-9]+$ ]] && (( period > 0 && quota > 0 )); then
+        local threads=$(( quota / period - 1 ))
+        (( threads < 1 )) && threads=1
+        echo "$threads"
+    fi
+}
+if [[ -z "${OLLAMA_NUM_THREAD:-}" ]]; then
+    detected_threads="$(container_cpu_threads)"
+    if [[ -n "$detected_threads" ]]; then
+        export OLLAMA_NUM_THREAD="$detected_threads"
+        echo "Ollama 스레드 수: $OLLAMA_NUM_THREAD (컨테이너 CPU 할당량 기준)"
+    fi
+fi
 export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-/app/.ollama/models}"
 # Colab이 주입하는 Jupyter 전용 matplotlib backend는 격리된 Worker venv에서
@@ -206,7 +229,9 @@ payload = json.dumps(
         "model": os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
         "prompt": "Reply OK only.",
         "think": False,
-        "options": {"num_ctx": int(os.environ["OLLAMA_NUM_CTX"]), "num_predict": 1, "temperature": 0},
+        # 이후 요청과 같은 실행 옵션(num_ctx / num_thread)으로 적재해야 첫 요청에서 재적재가 일어나지 않는다.
+        "options": {"num_ctx": int(os.environ["OLLAMA_NUM_CTX"]), "num_predict": 1, "temperature": 0,
+                    **({"num_thread": int(os.environ["OLLAMA_NUM_THREAD"])} if os.getenv("OLLAMA_NUM_THREAD") else {})},
         "stream": False,
         "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "12h"),
     }

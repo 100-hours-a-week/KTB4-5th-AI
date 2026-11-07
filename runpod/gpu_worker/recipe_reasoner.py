@@ -10,7 +10,7 @@ from time import perf_counter
 import httpx
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import Settings, ollama_runtime_options
 from app.errors import InvalidRequest, ModelUnavailable
 from app.logging.recipe_trace import latency
 from app.monitoring.metrics import observe_diagnostics
@@ -294,7 +294,7 @@ class RecipeTextReasoner:
         try:
             response = await self.client.post("/api/chat", json={
                 "model": self.settings.ollama_model, "stream": False, "think": False, "keep_alive": self.settings.ollama_keep_alive,
-                "format": output_schema, "options": {"temperature": 0, "num_predict": token_limit, "num_ctx": self.settings.ollama_num_ctx},
+                "format": output_schema, "options": {"temperature": 0, "num_predict": token_limit, **ollama_runtime_options(self.settings)},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": f"stage={request.stage}\n{context}"}],
             })
             response.raise_for_status()
