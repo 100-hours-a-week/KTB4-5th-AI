@@ -242,6 +242,8 @@ class RecommendationTrace(Contract):
     aiCandidateCount: int = 0
     aiInputBytes: int = 0
     timingsMs: dict[str, float] = Field(default_factory=dict)
+    # 단계별 판단 결과(저장 평가 적용 수, 순위 판단 결과, 취향 웹 보충 결과, 대체 추천 여부 등). 운영 진단용이며 사용자에게 표시하지 않는다.
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecommendationResponse(Contract):

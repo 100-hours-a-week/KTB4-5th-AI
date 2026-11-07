@@ -357,7 +357,11 @@ class RecipeTextReasoner:
                                  "llmPromptDurationNs": payload.get("prompt_eval_duration"), "llmEvalDurationNs": payload.get("eval_duration"),
                                  "llmLoadDurationNs": payload.get("load_duration")})
             outcome = "success"
-            return RecipeAiResponse(stage=request.stage, result=result, model=self.settings.ollama_model, promptVersion=PROMPT_VERSION)
+            usage = {"workerMs": round((perf_counter() - started) * 1000, 1), "promptTokens": payload.get("prompt_eval_count"),
+                     "cachedPromptTokens": payload.get("prompt_eval_cached_count"), "completionTokens": payload.get("eval_count"),
+                     "promptMs": diagnostic_ms(payload, "prompt_eval_duration"), "generationMs": diagnostic_ms(payload, "eval_duration"),
+                     "loadMs": diagnostic_ms(payload, "load_duration"), "modelTotalMs": diagnostic_ms(payload, "total_duration")}
+            return RecipeAiResponse(stage=request.stage, result=result, model=self.settings.ollama_model, promptVersion=PROMPT_VERSION, usage=usage)
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise

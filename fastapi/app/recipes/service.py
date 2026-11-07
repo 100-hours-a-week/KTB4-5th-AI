@@ -136,6 +136,12 @@ class RecipeService:
             expiring = {canonical(item.name) for item in inventory if 0 <= (item.expirationDate - today).days <= 3}
             ranker = MealRanker(self.reasoner, self.settings.recipe_ai_timeout_seconds, self._ai_slots, self.settings.ollama_model, self.settings.recipe_ai_input_max_bytes)
             ranker.decisions, ranker.circuit, ranker.situations = self._preference_decisions, self._ai_circuit, self._situation_decisions
+            # 단계별 소요 시간과 판단 결과다. 요약 로그와 trace.diagnostics로 남겨 병목과 보완 지점을 찾는다.
+            stage_ms: dict[str, float] = {}
+            diagnostics: dict = {"tagCount": len(request.preferenceTags)}
+
+            def spent(name: str, since: float) -> None:
+                stage_ms[name] = round(stage_ms.get(name, 0.0) + (monotonic() - since) * 1000, 3)
             context = {"today": today.isoformat(), "inventory": [item.model_dump(mode="json") for item in inventory],
                        "targetServings": request.targetServings, "strategies": request.strategies, "excludedIngredientNames": excluded,
                        "pantryIngredientNames": pantry, "limit": request.limit, "preferenceTags": request.preferenceTags,
@@ -197,6 +203,7 @@ class RecipeService:
             async def attach_profiles(rows: list[dict]) -> None:
                 if not request.preferenceTags or not self.settings.recipe_ai_enabled or not self.settings.recipe_taste_profiles_enabled:
                     return
+                loading = monotonic()
                 try:
                     async with asyncio.timeout(max(0.01, min(2, deadline - monotonic()))):
                         profiles = await self.taste_profiles.load_many(rows, self.settings.ollama_model)
@@ -207,11 +214,14 @@ class RecipeService:
                 except (DependencyUnavailable, TimeoutError):
                     ranker.warnings.append("TASTE_PROFILE_STORE_UNAVAILABLE")
                     logger.warning("recipe_taste_profile_store_unavailable")
+                finally:
+                    spent("tasteProfileLoadMs", loading)
 
             # 요리 성격 분류는 취향 / 상황 판단 모두에 쓴다. 미분류 후보는 원문 기반 보수 판정만 받는다.
             async def attach_attributes(rows: list[dict]) -> None:
                 if not self.settings.recipe_ai_enabled or not self.settings.recipe_attributes_enabled:
                     return
+                loading = monotonic()
                 try:
                     async with asyncio.timeout(max(0.01, min(2, deadline - monotonic()))):
                         found = await self.attributes.load_many([row for row in rows if "recipeAttributes" not in row], self.settings.ollama_model)
@@ -222,6 +232,8 @@ class RecipeService:
                 except (DependencyUnavailable, TimeoutError):
                     ranker.warnings.append("RECIPE_ATTRIBUTE_STORE_UNAVAILABLE")
                     logger.warning("recipe_attribute_store_unavailable")
+                finally:
+                    spent("attributeLoadMs", loading)
 
             ranked = [score_candidate(recipe) for recipe in candidates]
             await attach_profiles(ranked)
@@ -278,7 +290,18 @@ class RecipeService:
                 shortlist = representative_candidates(baseline, min(12, self.settings.recipe_ai_max_candidates))
             ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, self.settings.recipe_ai_timeout_seconds - (monotonic() - started)))
             can_call_ai = self.settings.recipe_ai_enabled and bool(shortlist) and (len(shortlist) > 1 or bool(request.preferenceTags))
+            # 저장 맛 평가 / 요리 분류가 평가 창을 얼마나 덮는지 남긴다. 낮으면 일괄 평가(backfill)가 필요하다.
+            taste_tags = [tag for tag in request.preferenceTags if not attribute_tag(tag)]
+            diagnostics.update(candidateCount=len(ranked), eligibleCount=len(baseline), shortlistCount=len(shortlist),
+                               shortlistTasteProfiled=sum(bool(row.get("tasteProfile")) and set(taste_tags) <= preference_decisions(
+                                   TasteProfile.model_validate(row["tasteProfile"]), taste_tags).keys() for row in shortlist) if taste_tags else None,
+                               shortlistAttributed=sum(bool(row.get("recipeAttributes")) for row in shortlist))
+            calls_before, ranking = ranker.calls, monotonic()
             selected = await ranker.rank(context, shortlist) if can_call_ai else None
+            spent("firstRankMs", ranking)
+            diagnostics["firstRankCalls"] = ranker.calls - calls_before
+            diagnostics["firstRankResult"] = "SKIPPED" if not can_call_ai else "CACHED" if selected is not None and ranker.calls == calls_before else (
+                "OK" if selected is not None else "FAILED")
             ranker.hydrate(context, baseline)
 
             # 행별 취향 판정을 반영한다. 웹 보충 뒤 다시 판정해도 문구가 겹치지 않게 기본 문구에서 다시 만든다.
@@ -327,17 +350,25 @@ class RecipeService:
                 return any(row.get("preferenceMatch") == "MATCHED" for row in baseline)
 
             assess_preferences(baseline)
+            diagnostics["matchedAfterFirstRank"] = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
             # 취향에 맞는 레시피가 없으면 응답 전에 취향 조건으로 웹 보충을 한 번 기다리고 새 후보를 다시 판정한다.
             if request.preferenceTags and names and not preference_found():
                 before = {(row["source"], row["sourceRecipeId"]) for row in ranked}
                 focus_names = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches) or search_names[:2]
                 supply_until = min(monotonic() + self.settings.recipe_preference_supply_timeout_seconds, deadline - PREFERENCE_RANK_RESERVE_SECONDS)
+                diagnostics["preferenceSupplyBudgetMs"] = round(max(0.0, supply_until - monotonic()) * 1000, 3)
                 if supply_used or supply_until - monotonic() < PREFERENCE_SUPPLY_MIN_SECONDS:
                     ranker.warnings.append("PREFERENCE_WEB_SUPPLY_SKIPPED")
+                    diagnostics["preferenceSupply"] = "SKIPPED_ALREADY_SUPPLIED" if supply_used else "SKIPPED_NO_TIME"
                 else:
-                    if await supplement(focus_names, allow_food_safety=False, until=supply_until):
+                    supplying = monotonic()
+                    supplied_any = await supplement(focus_names, allow_food_safety=False, until=supply_until)
+                    spent("preferenceSupplyMs", supplying)
+                    diagnostics["preferenceSupply"] = "ADDED" if supplied_any else "NO_NEW_RECIPE"
+                    if supplied_any:
                         ranker.warnings.append("PREFERENCE_WEB_SUPPLY_USED")
                         added = [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in before]
+                        diagnostics["preferenceSupplyAdded"] = len(added)
                         window = list({(row["source"], row["sourceRecipeId"]): row for row in
                                        [*added, *preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)]}.values())
                         window = window[:min(12, self.settings.recipe_ai_max_candidates)]
@@ -345,7 +376,11 @@ class RecipeService:
                         if self.settings.recipe_ai_enabled and window:
                             # 재판정은 상황 판단을 새로 받으므로, 이번 창에 없는 후보의 이전 상황 판단은 보존한다.
                             earlier = dict(ranker.context_factors)
+                            calls_before, ranking = ranker.calls, monotonic()
                             second = await ranker.rank(context, window)
+                            spent("secondRankMs", ranking)
+                            diagnostics["secondRankCalls"] = ranker.calls - calls_before
+                            diagnostics["secondRankResult"] = "OK" if second is not None else "FAILED"
                             for identity, factors in earlier.items():
                                 ranker.context_factors.setdefault(identity, factors)
                             if second is not None:
@@ -353,6 +388,7 @@ class RecipeService:
                     # 보충은 새 후보가 없어도 후보 목록을 다시 만들므로 항상 다시 판정한다.
                     ranker.hydrate(context, baseline)
                     assess_preferences(baseline)
+                    diagnostics["matchedAfterSupply"] = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
             # 웹 보충 뒤에도 맞는 레시피가 없으면 취향과 무관하게 추천하고 찾지 못했다고 알린다.
             preference_fallback = bool(request.preferenceTags) and not preference_found()
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
@@ -403,6 +439,10 @@ class RecipeService:
             if preference_fallback:
                 # 취향 판정을 무시하고 임박 활용 / 상황 판단 순서로 고른다. 확인된 불일치는 미확인보다 뒤에 둔다.
                 eligible = list(ordered)
+                for row in eligible:
+                    statuses = [item["status"] for item in row.get("preferenceAssessments", [])]
+                    # (맞은 태그 수 많은 순, 확인된 불일치 적은 순, 0). 상태 우선순위와 같은 길이를 유지한다.
+                    row["_fallbackRank"] = (-statuses.count("MATCHED"), statuses.count("NOT_MATCHED"), 0)
                 selection_request = matched_request.model_copy(update={"preferenceTags": []})
                 confirmations = confirmation_rows[:3]
                 ranker.warnings.extend(["PREFERENCE_MATCH_COUNT_BELOW_LIMIT", "PREFERENCE_MATCH_NOT_FOUND"])
@@ -449,7 +489,20 @@ class RecipeService:
                                    ensure_ascii=False, separators=(",", ":")))
             timings = {"databaseSearchMs": round(database_ms, 3), "initialCandidateEvaluationMs": round(validation_ms, 3),
                        "webExtractionMs": round(sum(report.extraction_ms for report in web_reports), 3),
-                       "aiRankMs": round(ranker.duration_ms, 3), "recommendationMs": round((monotonic() - started) * 1000, 3)}
+                       "aiRankMs": round(ranker.duration_ms, 3), **stage_ms, "recommendationMs": round((monotonic() - started) * 1000, 3)}
+            diagnostics.update(preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
+                               returnedCount=len(result), returnedMatched=sum(row.get("preferenceMatch") == "MATCHED" for row in result),
+                               situationUsed=sum(bool(row.get("contextFactors")) for row in result),
+                               weather=(context["recommendationContext"].get("weather") or {}).get("temperatureBand"),
+                               mealTime=context["recommendationContext"].get("mealTime"), aiCalls=ranker.calls,
+                               webSearches=sum(report.searches for report in web_reports), webDiscovered=sum(report.discovered for report in web_reports),
+                               webValidated=sum(len(report.recipes) for report in web_reports),
+                               webExtractionCalls=sum(report.extraction_calls for report in web_reports),
+                               webUnavailable=any(report.unavailable for report in web_reports), rankUsage=ranker.rank_usage)
+            # 요청 하나를 한 줄로 요약한다. 서버에서 `grep recipe_pipeline_summary`로 단계별 병목을 확인한다.
+            logger.info("recipe_pipeline_summary %s", json.dumps({"requestId": request.requestId, "timingsMs": timings, **diagnostics,
+                                                                  "warnings": list(dict.fromkeys(ranker.warnings))},
+                                                                 ensure_ascii=False, separators=(",", ":")))
             web_failures = {}
             for report in web_reports:
                 for code, count in report.failure_reasons.items():
@@ -480,7 +533,8 @@ class RecipeService:
                                                   "webSearchCacheHits": sum(report.search_cache_hits for report in web_reports),
                                                   "webExtractionCacheHits": sum(report.extraction_cache_hits for report in web_reports),
                                                   "candidateCoverage": coverage_counts(baseline, shortlist, evaluated, result),
-                                                  "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings})
+                                                  "aiCandidateCount": ranker.candidate_count, "aiInputBytes": ranker.input_bytes, "timingsMs": timings,
+                                                  "diagnostics": diagnostics})
 
         result, cached = await self.cache.get_or_load(key, load)
         # 캐시는 추천 내용만 재사용한다. 현재 작업이 모델 / 검색을 다시 실행한 것처럼 표시하지 않는다.

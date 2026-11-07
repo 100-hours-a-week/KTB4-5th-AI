@@ -115,3 +115,5 @@ class RecipeAiResponse(WireModel):
     result: PlanResult | SelectionResult | RankResult | ExtractedRecipe | TasteProfile | RecipeAttributes
     model: str
     promptVersion: str = PROMPT_VERSION
+    # Worker의 모델 사용량(토큰 수 / 프롬프트 처리 / 생성 / 로드 시간). 운영 진단용이며 구버전 Worker는 보내지 않는다.
+    usage: dict[str, float | int | None] | None = None

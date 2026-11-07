@@ -11,7 +11,7 @@ import httpx
 
 from app.errors import AppError
 from app.logging.recipe_trace import latency
-from app.recipes.ai import RecipeReasoner
+from app.recipes.ai import RecipeReasoner, last_usage
 from app.recipes.ai_contract import PROMPT_VERSION, RankResult, TasteProfile
 from app.recipes.candidate_pool import representative_candidates
 from app.recipes.context import variation_key
@@ -67,6 +67,8 @@ class MealRanker:
         self.context_factors: dict[tuple[str, str], list[str]] = {}
         self.situations = SituationDecisionCache()
         self.situation_cache_hits = 0
+        # RANK 호출별 Worker 모델 사용량(토큰 / 프롬프트 처리 / 생성 시간)과 FastAPI에서 잰 왕복 시간이다.
+        self.rank_usage: list[dict] = []
 
     # 현재 평가 창 밖이라도 같은 원문 / 취향의 검증된 판정이 있으면 후보 풀에 적용한다.
     def hydrate(self, context: dict, rows: list[dict]) -> None:
@@ -253,7 +255,11 @@ class MealRanker:
                     self.calls += 1
                     logger.info("recipe_ai_request candidate_count=%d input_bytes=%d attempt=%d budget_seconds=%.2f", len(window), self.input_bytes, attempt + 1, payload["executionBudgetSeconds"])
                     try:
+                        last_usage.set(None)
+                        calling = monotonic()
                         result, model = await self.reasoner.rank(payload)
+                        self.rank_usage.append({"candidates": len(window), "inputBytes": self.input_bytes,
+                                                "roundTripMs": round((monotonic() - calling) * 1000, 1), **(last_usage.get() or {})})
                         break
                     except AI_ERRORS as exc:
                         limited = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429 or isinstance(exc, AppError) and exc.status_code == 429

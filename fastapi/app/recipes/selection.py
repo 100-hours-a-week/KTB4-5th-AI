@@ -10,6 +10,9 @@ from app.recipes.schemas import RecommendationRequest
 
 # 같은 원문 근거에 여러 취향 태그가 연결돼도 근거 수를 중복 가산하지 않는다.
 def preference_priority(row: dict) -> tuple[int, ...]:
+    # 취향 일치가 없어 대체 추천할 때는 일부라도 맞은 태그가 많은 후보를 앞에 둔다(service가 계산해 넣는다).
+    if "_fallbackRank" in row:
+        return row["_fallbackRank"]
     status = row.get("preferenceMatch")
     if status in {None, "NOT_REQUESTED"}:
         return ()

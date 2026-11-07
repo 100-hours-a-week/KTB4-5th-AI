@@ -1,8 +1,13 @@
 """이미지 분석과 동일 Worker의 Gemma를 이용하는 단일 후보 순위 조정 어댑터."""
 
+from contextvars import ContextVar
+
 from app.adapters.remote_inference import RemoteInferenceClient
 from app.config import Settings
 from app.recipes.ai_contract import PROMPT_VERSION, ExtractedRecipe, RankResult, RecipeAiResponse, RecipeAttributes, TasteProfile
+
+# 같은 작업(task) 안에서 직전 Worker 호출의 모델 사용량을 읽는다. 공유 어댑터라 인스턴스 속성 대신 컨텍스트 변수를 쓴다.
+last_usage: ContextVar[dict | None] = ContextVar("recipe_ai_last_usage", default=None)
 
 
 class RecipeReasoner:
@@ -45,6 +50,7 @@ class RecipeReasoner:
         result = RecipeAiResponse.model_validate(payload)
         if result.stage != stage or result.promptVersion != PROMPT_VERSION:
             raise ValueError("RECIPE_AI_PROTOCOL_MISMATCH")
+        last_usage.set(result.usage)
         return result
 
     # 레시피 전용 HTTP 클라이언트를 정리한다.

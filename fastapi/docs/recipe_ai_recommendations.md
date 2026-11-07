@@ -200,3 +200,25 @@ python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --a
 2. 맞는 레시피가 없으면 응답 전에 취향 태그를 넣은 웹 보충을 한 번 기다린다. 이전에는 백그라운드로 미뤄 다음 요청에만 반영했다. 새 후보가 생기면 RANK를 한 번 더 호출해 다시 판정하므로, 이 경우 GPU 호출은 최대 2회이고 응답이 늦어질 수 있다(웹 보충 최대 `RECIPE_PREFERENCE_SUPPLY_TIMEOUT_SECONDS`=16초 + 재판정). 재판정에 8초를 남기지 못하면 보충하지 않는다. 재판정에 없는 후보의 상황 판단은 1차 판정 값을 유지한다.
 3. 그래도 없으면 `preferenceResult=NOT_FOUND`, `notice` 안내 문구와 함께 취향과 무관한 추천을 반환한다. 이때 날씨 / 시간대 판단으로 순서를 정한다.
 4. 날씨는 화면에 보이지 않는 순서 판단용 정보다. `reason`에 날씨 문장을 붙이지 않는다.
+
+## v25 운영 진단 (단계별 시간 / 판단 결과)
+
+요청마다 `recipe_pipeline_summary {...}` 한 줄을 INFO로 남기고, 같은 값을 응답 `trace.diagnostics`와 `trace.timingsMs`에 담는다. 사용자에게 표시하지 않는다.
+
+- `timingsMs`: 기존 구간에 실행된 단계만 추가한다. `tasteProfileLoadMs` / `attributeLoadMs`(023 / 024 조회), `firstRankMs`(1차 순위 판단), `preferenceSupplyMs`(취향 웹 보충), `secondRankMs`(보충 후 재판정).
+- `diagnostics`
+  - `shortlistCount`, `shortlistTasteProfiled`: 평가 창 후보 수와 그중 저장 맛 평가가 요청 맛 태그를 모두 다루는 수. 둘이 같으면 GPU 호출 없이 판정한다. 작으면 `profile_backfill`이 필요하다.
+  - `shortlistAttributed`: 요리 분류(024)가 있는 후보 수. 작으면 `attribute_backfill`이 필요하다.
+  - `firstRankResult`: OK / CACHED(저장 평가 / 캐시로 생략) / FAILED / SKIPPED, `firstRankCalls`
+  - `matchedAfterFirstRank`, `matchedAfterSupply`, `preferenceResult`, `returnedCount`, `returnedMatched`, `situationUsed`
+  - `preferenceSupply`: ADDED / NO_NEW_RECIPE / SKIPPED_NO_TIME / SKIPPED_ALREADY_SUPPLIED, `preferenceSupplyBudgetMs`, `preferenceSupplyAdded`, `webSearches`, `webDiscovered`, `webValidated`, `webExtractionCalls`, `webUnavailable`
+  - `rankUsage`: RANK 호출별 `candidates`, `inputBytes`, `roundTripMs`(FastAPI 왕복)와 Worker 사용량 `workerMs`, `promptTokens`, `cachedPromptTokens`, `completionTokens`, `promptMs`, `generationMs`, `loadMs`, `modelTotalMs`. `roundTripMs - workerMs`는 네트워크 / 프록시 / 슬롯 대기다.
+- Worker 응답에 `usage` 필드를 추가했다. FastAPI는 이 필드가 없는 구버전 Worker도 받지만, 구버전 FastAPI는 새 Worker 응답을 거부하므로 **FastAPI를 먼저(또는 함께) 배포**한다.
+
+대체 추천(`preferenceResult=NOT_FOUND`)은 요청 태그 중 MATCHED 수가 많은 후보, 확인된 불일치가 적은 후보 순으로 먼저 비교한 뒤 임박 활용 / 상황 판단 순서를 따른다.
+
+서버에서 확인:
+
+```bash
+docker logs --since 1h <FastAPI 컨테이너> 2>&1 | grep recipe_pipeline_summary
+```
