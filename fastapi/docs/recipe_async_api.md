@@ -205,10 +205,10 @@ requiredAmount = amountValue × targetServings ÷ (baseServings 또는 1)
 ### 취향 결과 / 대체 추천 (v25)
 
 - 취향 태그가 있으면 요약 `preferenceMatch=MATCHED`인 레시피만 `recommendations`에 넣는다. 취향 미확인(UNKNOWN) / 불일치 후보는 `confirmationCandidates`에도 넣지 않는다.
-- 맞는 레시피가 하나도 없으면 응답 전에 취향 조건으로 웹 보충(Tavily)을 한 번 기다리고 새 후보를 Gemma로 다시 판정한다. 남은 시간이 5초 미만이거나 이미 후보 부족으로 보충했다면 생략하고 `PREFERENCE_WEB_SUPPLY_SKIPPED`를 붙인다. 보충 결과가 있으면 `PREFERENCE_WEB_SUPPLY_USED`.
+- 맞는 레시피가 하나도 없으면 응답 전에 취향 조건으로 웹 보충(Tavily)을 한 번 기다리고 새 후보를 Gemma로 다시 판정한다. 보충은 최대 16초(`RECIPE_PREFERENCE_SUPPLY_TIMEOUT_SECONDS`)이며 재판정 시간 8초를 남긴다. 그만큼 시간이 남지 않았거나 이미 후보 부족으로 보충했다면 생략하고 `PREFERENCE_WEB_SUPPLY_SKIPPED`를 붙인다. 보충 결과가 있으면 `PREFERENCE_WEB_SUPPLY_USED`.
 - 그래도 없으면 취향과 무관하게 임박 활용 / 날씨 / 시간대 순서로 추천하고 다음을 반환한다. 각 항목의 `preferenceMatch`는 MATCHED가 아닌 실제 판정을 유지한다.
   - `preferenceResult`: `NOT_REQUESTED`(취향 없음) / `MATCHED`(취향 일치 추천) / `NOT_FOUND`(대체 추천)
-  - `notice`: NOT_FOUND일 때 `선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요.` 그 밖에는 null. **백엔드 / 앱은 이 문구를 목록 위에 표시한다.**
+  - `notice`: NOT_FOUND일 때 `선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요.` 대체 추천도 없으면 `선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요.` 그 밖에는 null. **백엔드 / 앱은 이 문구를 목록 위에 표시한다.**
   - 경고 `PREFERENCE_MATCH_NOT_FOUND`
 - 날씨는 사용자에게 표시하지 않는다. 취향이 없거나 NOT_FOUND일 때만 순서에 반영한다.
 
@@ -227,7 +227,7 @@ requiredAmount = amountValue × targetServings ÷ (baseServings 또는 1)
 - 항목 `contextFactors`: AI가 고르고 서버가 날씨 / 시간대 / 계절 / 요리 분류와 대조해 확인한 이유 코드. `WARM_FOR_COLD`, `SOUP_FOR_RAIN`, `LIGHT_FOR_HEAT`, `MEAL_TIME_FIT`, `SEASON_FIT`, `PREFERENCE_FIT`, `USES_EXPIRING`, `LOW_SHOPPING`. v25부터 `reason`에 날씨 / 상황 문장을 붙이지 않는다. 취향 일치 추천(`preferenceResult=MATCHED`)에서는 순서에 쓰지 않으므로 빈 목록이다. AI의 자유 문장은 노출하지 않는다.
 - 정렬: 취향이 없거나 NOT_FOUND일 때만, 임박 주재료 활용 우선순위 다음에 확인된 상황 코드가 있는 후보를 앞에 둔다.
 - 경고: `AI_SITUATION_JUDGEMENT_USED`(확인된 상황 판단이 반영됨), `AI_CONTEXT_REASON_REJECTED`(모델 이유 일부가 사실과 달라 버림), `RECIPE_ATTRIBUTE_STORE_UNAVAILABLE`(024 미적용 등).
-- `trace.situationDecisionCacheHits`: 같은 레시피 / 날씨 구간 / 강수 / 계절 / 시간대의 상황 판단을 재사용한 수(프로세스 메모리, 1시간). 취향 판정과 상황 판단이 모두 재사용되면 aiCalls=0일 수 있다.
+- `trace.situationDecisionCacheHits`: 같은 레시피 / 날씨 구간 / 강수 / 계절 / 시간대의 상황 판단을 재사용한 수(프로세스 메모리, 1시간). 취향 판정과 상황 판단이 모두 재사용되면 aiCalls=0일 수 있다. v25부터 취향 요청은 상황 판단을 이유로 모델을 호출하지 않는다. 후보의 취향 판정이 모두 저장 맛 평가(023) / 캐시로 해결되면 aiCalls=0이며, 대체 추천(NOT_FOUND)에는 캐시에 있는 상황 판단만 쓴다.
 
 ### 결과 조회 JSON 예시
 

@@ -41,8 +41,11 @@ logger = logging.getLogger(__name__)
 DEFERRED_RECIPE_TTL_SECONDS = 3600
 DEFERRED_RECIPE_MAX_ENTRIES = 200
 # 취향 웹 보충은 검색 / 추출 / 재판정 시간이 남아 있을 때만 기다린다.
-PREFERENCE_SUPPLY_MIN_SECONDS = 5
+# 웹 보충 뒤 새 후보를 다시 판정할 시간을 남긴다. 남은 시간이 보충 최소 시간 + 이 값보다 적으면 보충하지 않는다.
+PREFERENCE_RANK_RESERVE_SECONDS = 8
+PREFERENCE_SUPPLY_MIN_SECONDS = 4
 PREFERENCE_NOT_FOUND_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요."
+PREFERENCE_AND_FALLBACK_EMPTY_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요."
 
 
 class RecipeService:
@@ -233,14 +236,15 @@ class RecipeService:
                                          if canonical(item.name) in expiring - covered))
 
             # 공급은 별도 책임으로 위임하고 같은 추천 작업에서는 한 번만 실행한다.
-            async def supplement(focus_names: list[str], allow_food_safety: bool = True) -> bool:
+            async def supplement(focus_names: list[str], allow_food_safety: bool = True, until: float | None = None) -> bool:
                 nonlocal supply_used, ranked, baseline, source, external_searched, web_searches
                 if supply_used or not focus_names or deadline - monotonic() < 1:
                     return False
                 supply_used = True
                 supplier = RecipeSupply(self.settings, self.repository, self.provider, self.web_provider)
+                limit = until if until is not None else monotonic() + self.settings.recipe_supply_timeout_seconds
                 supplied = await supplier.replenish(focus_names, search_names, request.preferenceTags,
-                                                     min(deadline, monotonic() + self.settings.recipe_supply_timeout_seconds), allow_food_safety, usable=usable)
+                                                     min(deadline, limit), allow_food_safety, usable=usable)
                 ranker.warnings.extend(supplied.warnings)
                 external_searched = supplied.food_safety_searched
                 web_reports.extend(supplied.web_reports)
@@ -327,10 +331,11 @@ class RecipeService:
             if request.preferenceTags and names and not preference_found():
                 before = {(row["source"], row["sourceRecipeId"]) for row in ranked}
                 focus_names = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches) or search_names[:2]
-                if supply_used or deadline - monotonic() < PREFERENCE_SUPPLY_MIN_SECONDS:
+                supply_until = min(monotonic() + self.settings.recipe_preference_supply_timeout_seconds, deadline - PREFERENCE_RANK_RESERVE_SECONDS)
+                if supply_used or supply_until - monotonic() < PREFERENCE_SUPPLY_MIN_SECONDS:
                     ranker.warnings.append("PREFERENCE_WEB_SUPPLY_SKIPPED")
                 else:
-                    if await supplement(focus_names, allow_food_safety=False):
+                    if await supplement(focus_names, allow_food_safety=False, until=supply_until):
                         ranker.warnings.append("PREFERENCE_WEB_SUPPLY_USED")
                         added = [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in before]
                         window = list({(row["source"], row["sourceRecipeId"]): row for row in
@@ -338,7 +343,11 @@ class RecipeService:
                         window = window[:min(12, self.settings.recipe_ai_max_candidates)]
                         ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
                         if self.settings.recipe_ai_enabled and window:
+                            # 재판정은 상황 판단을 새로 받으므로, 이번 창에 없는 후보의 이전 상황 판단은 보존한다.
+                            earlier = dict(ranker.context_factors)
                             second = await ranker.rank(context, window)
+                            for identity, factors in earlier.items():
+                                ranker.context_factors.setdefault(identity, factors)
                             if second is not None:
                                 selected, shortlist = second, window
                     # 보충은 새 후보가 없어도 후보 목록을 다시 만들므로 항상 다시 판정한다.
@@ -458,7 +467,7 @@ class RecipeService:
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
-                                          notice=PREFERENCE_NOT_FOUND_NOTICE if preference_fallback else None,
+                                          notice=(PREFERENCE_NOT_FOUND_NOTICE if result else PREFERENCE_AND_FALLBACK_EMPTY_NOTICE) if preference_fallback else None,
                                           context=context["recommendationContext"],
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
                                                  "tasteProfileCount": used_profiles,

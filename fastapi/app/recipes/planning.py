@@ -156,8 +156,10 @@ class MealRanker:
         situation_keys = {(row["source"], row["sourceRecipeId"]): self.situations.key(row, context["recommendationContext"], self.expected_model,
                                                                                     PROMPT_VERSION, POLICY_VERSION) for row in fitted} if contextual else {}
         situation_cached = {identity: factors for identity, key in situation_keys.items() if (factors := self.situations.get(key)) is not None}
-        # 상황 판단이 필요한 요청은 취향 판정과 상황 판단이 모두 캐시돼 있을 때만 모델 호출을 생략한다.
-        all_cached = bool(fitted and preference_ready and (len(situation_cached) == len(fitted) if contextual else tags))
+        # 날씨 / 시간대 판단은 취향이 없을 때만 모델 호출 사유가 된다. 취향 요청은 판정이 모두 저장 / 캐시돼 있으면
+        # 호출을 생략하고, 취향을 못 찾아 대체 추천할 때는 캐시에 있는 상황 판단만 쓴다.
+        situation_required = contextual and not tags
+        all_cached = bool(fitted and preference_ready and (len(situation_cached) == len(fitted) if situation_required else tags))
         if all_cached:
             self.preference_matches.clear()
             self.preference_evidence.clear()
