@@ -179,7 +179,8 @@ class MealRanker:
         else:
             selected = await self._rank(context, shortlist)
             # 정상 응답이면 평가 창의 모든 후보에 대해 상황 판단을 저장한다. 이유가 없던 후보도 '해당 없음' 판단이다.
-            if selected is not None and contextual:
+            # 취향 요청은 상황 이유를 요청하지 않으므로 빈 결과를 '해당 없음'으로 저장하면 안 된다.
+            if selected is not None and situation_required:
                 for row in selected:
                     identity = (row["source"], row["sourceRecipeId"])
                     if identity in situation_keys:
@@ -475,14 +476,27 @@ def pack_rank_input(context: dict, shortlist: list[dict], max_bytes: int) -> tup
         raise ValueError("RECIPE_CONTEXT_TOO_LARGE")
     shortlist = representative_candidates(shortlist, len(shortlist))
     # 남은 재료/분량은 FastAPI가 이미 검증했다. 모델이 빠진 중량을 추측할 필요가 없다.
+    tags = context.get("preferenceTags")
+    if tags:
+        # 취향 요청에서 모델이 하는 일은 원문 근거 판정뿐이다. 최종 순서는 서버가 정하고 날씨 이유도 쓰지 않으므로
+        # 재고 / 임박 / 분량 / 요리 분류 열을 빼고 상황 이유 출력을 끈다. GPU 입력 / 출력 토큰이 줄어 응답이 빨라진다.
+        base["ingredientColumns"] = ["ingredientNo", "name"]
+        base["contextReasonsWanted"] = False
     for count in range(len(shortlist), 0, -1):
         window = shortlist[:count]
-        payload = {**base, "candidates": compact_candidates(window, brief=True), "executionBudgetSeconds": 60.0}
+        if tags:
+            candidates = [{"candidateId": index, "name": row["name"],
+                           "ingredients": [[item["ingredientNo"], item["name"]] for item in row["ingredients"]],
+                           "steps": [step["instruction"][:80] for step in row["steps"][:2]], "stepCount": len(row["steps"])}
+                          for index, row in enumerate(window, 1)]
+        else:
+            candidates = compact_candidates(window, brief=True)
+        payload = {**base, "candidates": candidates, "executionBudgetSeconds": 60.0}
         for candidate, row in zip(payload["candidates"], window, strict=True):
             attributes = compact_attributes(row.get("recipeAttributes"))
-            if attributes:
+            if attributes and not tags:
                 candidate["attributes"] = attributes
-        if context.get("preferenceTags"):
+        if tags:
             for candidate, row in zip(payload["candidates"], window, strict=True):
                 candidate["tasteContext"] = taste_context(row)
                 quotes = [item["name"] for item in row["ingredients"] if len(item["name"]) <= 80]

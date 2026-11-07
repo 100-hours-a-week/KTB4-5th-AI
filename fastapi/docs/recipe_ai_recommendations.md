@@ -222,3 +222,13 @@ python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --a
 ```bash
 docker logs --since 1h <FastAPI 컨테이너> 2>&1 | grep recipe_pipeline_summary
 ```
+
+### GPU 측정 결과와 취향 요청 RANK 경량화 (2026-11-07)
+
+dev Pod(RTX A5000, `gemma4:e2b` Q4_K_M, num_ctx 32768, 100% GPU)에서 측정했다. 출력 생성 속도는 JSON 스키마를 강제하면 약 38~42 토큰/초, 자유 출력은 약 52 토큰/초이고, 입력 처리는 약 1,170 토큰/초다. 취향 요청 1건(RANK 2회)은 입력 8,028토큰(약 7초) + 출력 445토큰(약 13초) = 21.4초였다. 응답 시간은 대부분 출력 토큰 수로 정해진다.
+
+- 취향 요청의 RANK는 `contextReasonsWanted=false`를 보내고, Worker는 `contextReasons`를 `maxItems=0`으로 막는다. 취향 요청은 날씨를 순서에 쓰지 않으므로 상황 이유 출력(후보당 약 15~30토큰)이 필요 없다. 이때의 빈 결과는 상황 캐시에 저장하지 않는다.
+- 취향 요청의 후보 입력은 `candidateId`, `name`, `ingredients`([번호, 이름]), 앞 2개 조리 단계, `stepCount`, `tasteContext`, `preferenceEvidenceOptions`만 보낸다. 재고 / 임박 / 분량 / 적합성 / 요리 분류 열은 최종 순서를 정하는 서버만 쓴다.
+- 취향 웹 보충 뒤 재판정은 새로 들어온 레시피만 보낸다. 기존 후보 판정은 판정 캐시에서 복원한다.
+- 대체 추천(NOT_FOUND)의 날씨 순서는 무취향 요청이 남긴 상황 캐시가 있을 때만 반영된다.
+- Worker는 `contextReasonsWanted`가 없으면 기존처럼 상황 이유를 받는다. 이번 변경은 FastAPI와 Worker를 함께 배포해야 효과가 난다. 순서는 FastAPI 먼저.

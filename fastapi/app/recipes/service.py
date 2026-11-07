@@ -369,9 +369,8 @@ class RecipeService:
                         ranker.warnings.append("PREFERENCE_WEB_SUPPLY_USED")
                         added = [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in before]
                         diagnostics["preferenceSupplyAdded"] = len(added)
-                        window = list({(row["source"], row["sourceRecipeId"]): row for row in
-                                       [*added, *preference_shortlist(baseline, request.preferenceTags, self.settings.recipe_ai_max_candidates)]}.values())
-                        window = window[:min(12, self.settings.recipe_ai_max_candidates)]
+                        # 기존 후보의 판정은 캐시에서 복원되므로 새로 들어온 레시피만 다시 판정한다.
+                        window = added[:min(12, self.settings.recipe_ai_max_candidates)]
                         ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
                         if self.settings.recipe_ai_enabled and window:
                             # 재판정은 상황 판단을 새로 받으므로, 이번 창에 없는 후보의 이전 상황 판단은 보존한다.
