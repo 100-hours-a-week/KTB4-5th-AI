@@ -33,6 +33,7 @@ class RemoteInferenceClient:
         self._discovered_url: str | None = None
         self._discovered_at = 0.0
         self._discovery_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
 
     # 객체 키를 서명 URL로 바꿔 Worker에 보내고 도메인 추론 묶음으로 변환한다.
     async def infer(self, object_key: str, sha256: str, input_hint: str) -> RemoteInferenceBundle:
@@ -166,12 +167,34 @@ class RemoteInferenceClient:
         now = time.monotonic()
         if not force and self._discovered_url and now - self._discovered_at < self._settings.runpod_discovery_ttl_seconds:
             return self._discovered_url
+        # 주소를 이미 알면 바로 쓰고 갱신은 뒤에서 한다. 요청 도중 RunPod API + 준비 확인(dev 실측 약 0.5~0.8초)을 기다리지 않는다.
+        # Pod가 바뀌어 호출이 실패하면 호출 쪽에서 주소를 지우고 다음 호출이 새로 탐색한다.
+        if not force and self._discovered_url:
+            self._refresh_in_background()
+            return self._discovered_url
 
         async with self._discovery_lock:
             now = time.monotonic()
             if not force and self._discovered_url and now - self._discovered_at < self._settings.runpod_discovery_ttl_seconds:
                 return self._discovered_url
             return await self._discover_worker()
+
+    # 한 번에 하나만 갱신한다. 실패하면 기존 주소를 유지하고 실제 호출 실패 때 무효화한다.
+    def _refresh_in_background(self) -> None:
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
+
+        async def refresh() -> None:
+            try:
+                async with self._discovery_lock:
+                    if time.monotonic() - self._discovered_at >= self._settings.runpod_discovery_ttl_seconds:
+                        await self._discover_worker()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("remote_inference.background_discovery_failed error_type=%s", type(exc).__name__)
+
+        self._refresh_task = asyncio.create_task(refresh())
 
     # 이미지 경로와 같은 인증·Pod 탐색을 사용하되 레시피 추론은 재시도 없이 제한 시간 내 호출한다.
     async def reason_recipe(self, payload: dict, timeout: float) -> dict:
@@ -207,6 +230,9 @@ class RemoteInferenceClient:
                 raise
             except Exception as exc:
                 latency("remote_error", stage=payload.get("stage"), current_phase=phase, error_type=type(exc).__name__, http_status=status)
+                # 연결 실패나 프록시가 Pod를 찾지 못한 응답이면 기억한 주소를 지운다. 다음 호출(호출 쪽 재시도 포함)은 새로 탐색한다.
+                if not self._settings.remote_inference_url and (isinstance(exc, httpx.RequestError) or status in {404, 502, 530}):
+                    self._invalidate_discovery()
                 raise
             finally:
                 latency("remote_finished", stage=payload.get("stage"), current_phase=phase, outcome=outcome, http_status=status,
@@ -256,6 +282,9 @@ class RemoteInferenceClient:
 
     # 이 어댑터가 생성한 HTTP 클라이언트만 종료한다.
     async def close(self) -> None:
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            await asyncio.gather(self._refresh_task, return_exceptions=True)
         if self._owns_client:
             await self._client.aclose()
 
