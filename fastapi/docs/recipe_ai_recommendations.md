@@ -236,3 +236,15 @@ dev Pod(RTX A5000, `gemma4:e2b` Q4_K_M, num_ctx 32768, 100% GPU)에서 측정했
 - **조치**: Worker `start.sh`가 cgroup 할당량 - 1(최소 1)을 `OLLAMA_NUM_THREAD`로 내보내고, 예열 / 레시피 / 이미지 분석의 모든 Ollama 호출이 `ollama_runtime_options()`로 같은 `num_ctx` / `num_thread`를 보낸다. 값이 호출마다 다르면 Ollama가 모델을 다시 적재한다(실측 약 22초). 수동으로 정하려면 `OLLAMA_NUM_THREAD` 환경 변수를 넣는다.
 
 - **예열(2026-11-07)**: 짧은 문장 예열 뒤 첫 실제 RANK에서 입력 처리에 약 17초가 더 걸렸다. `start.sh`가 uvicorn 시작 전에 실제 경로(`RecipeTextReasoner`, JSON 스키마, 같은 `num_ctx` / `num_thread`, 후보 8개 입력)로 RANK를 한 번 실행한다. 실패해도 Worker는 시작한다. `WARM_RECIPE_RANK_ON_START=false`로 끌 수 있다.
+
+### 취향 RANK 출력 압축 (2026-11-08)
+
+취향 요청(`preferenceTags` 있음, `contextReasonsWanted=false`, 모든 후보에 `preferenceEvidenceOptions` 있음)의 RANK는 Worker가 전용 프롬프트(`RANK_PREFERENCE_SYSTEM`)와 압축 출력 형식을 쓴다. FastAPI와의 응답 계약(`RankResult`, `promptVersion`)은 바뀌지 않아 Worker만 배포하면 된다.
+
+- 모델 입력: 후보별 인용 목록을 `[evidenceNo, quote]`로 번호를 붙여 보낸다(`evidenceOptionColumns`). 쓰지 않는 `recommendationContext`는 뺀다.
+- 모델 출력: `{"c1":{"매운거":2,"담백한거":0},...}`. 모든 후보와 태그를 스키마 필수 키로 두고, 값은 그 후보 인용 번호(0=근거 없음)다. 원문 인용 문장과 쓰지 않는 순위 배열(`candidateIds`)을 생성하지 않는다.
+- Worker가 번호를 원문 인용으로 되돌리고 `candidateIds`는 입력 순서로 채운다. 최종 순서는 기존처럼 서버 정책이 정한다. 번호가 범위를 벗어나거나 후보 키가 빠지면 `RECIPE_INVALID_MODEL_RESPONSE`다.
+- 실측(dev Pod, 후보 12개, num_thread 6, 두 번째 호출 기준): 매운거 1.3초 → 0.67초, 담백한거 1.38초 → 0.69초, 매운거+담백한거 1.27초 → 0.89초.
+- 판정: 근거 목록 방식에 한 줄 출력만 지시하면 모델이 뒤 후보를 빠뜨렸다(매운 요리 5개 중 3~4개). 후보별 필수 키 방식은 매운 요리를 모두 찾았고, 이전 방식이 매운 찌개를 담백하다고 판정하거나 두 번째 태그를 건너뛰던 문제도 줄었다. 줄바꿈/들여쓰기 JSON은 출력 토큰이 2배라 한 줄 출력을 지시한다.
+- 병렬 시험: `OLLAMA_NUM_PARALLEL=3` 임시 서버에서 후보를 4개씩 3묶음 동시 판정하면 1.2초 → 0.9초였다. 효과가 작고 동시 사용자끼리 슬롯을 나누게 되어 적용하지 않았다.
+- 남은 대기: BE 추천 outbox가 `recommendation.outbox.poll-interval`(기본 5s) 주기로 Kafka에 발행해 요청마다 0~5초(평균 약 2.5초)를 기다린다. 커밋 직후 발행하거나 주기를 줄이는 것은 BE 변경이다.
