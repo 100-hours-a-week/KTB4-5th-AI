@@ -176,6 +176,13 @@ class MealRanker:
             self.model = self.expected_model
             self.context_factors = dict(situation_cached)
             self.situation_cache_hits += len(situation_cached)
+        elif tags and cached and not situation_required:
+            # 저장 평가 / 판정 캐시로 끝난 후보는 GPU에 다시 보내지 않는다. 12개 중 1개만 미평가여도 12개를 모두 보내
+            # 요청마다 GPU 왕복 1.9~2.6초가 들었다(dev 실측). 순서는 서버 정책이 정하므로 미평가 후보만 판정한다.
+            window = fitted or shortlist
+            pending = [row for row in shortlist if (row["source"], row["sourceRecipeId"]) not in cached]
+            judged = await self._rank(context, pending)
+            selected = None if judged is None else [*judged, *(row for row in window if (row["source"], row["sourceRecipeId"]) in cached)]
         else:
             selected = await self._rank(context, shortlist)
             # 정상 응답이면 평가 창의 모든 후보에 대해 상황 판단을 저장한다. 이유가 없던 후보도 '해당 없음' 판단이다.
