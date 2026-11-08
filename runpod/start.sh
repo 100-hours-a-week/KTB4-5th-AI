@@ -260,6 +260,48 @@ if os.getenv("REQUIRE_GPU", "true").lower() == "true" and paddle.device.cuda.dev
 print(f"Paddle GPU count: {paddle.device.cuda.device_count()}", flush=True)
 PY
 
+    # 짧은 문장 예열만으로는 첫 실제 요청(JSON 스키마 출력 + 수천 토큰 입력)에서 입력 처리 준비에 약 17초가 더 걸렸다(실측).
+    # 실제와 같은 코드 경로 / 실행 옵션 / 입력 크기로 레시피 순위 판단을 한 번 실행해 둔다. 실패해도 Worker 시작은 계속한다.
+    if [[ "${WARM_MODEL_ON_START:-true}" == "true" && "${WARM_RECIPE_RANK_ON_START:-true}" == "true" ]]; then
+        python - <<'PY' || echo "레시피 판단 예열 실패: 첫 요청이 느릴 수 있습니다." >&2
+import asyncio
+import time
+
+from app.config import get_settings
+from gpu_worker.recipe_contract import RecipeAiRequest
+from gpu_worker.recipe_reasoner import RecipeTextReasoner
+
+dishes = [("두부고추장찌개", ["두부", "고추장", "대파", "돼지고기", "양파"], "돼지고기를 볶다가 고추장을 풀고 물을 부어 두부와 함께 끓인다."),
+          ("두부조림", ["두부", "간장", "설탕", "대파", "고춧가루"], "두부를 노릇하게 부친 뒤 간장 양념을 끼얹어 약불에서 조린다."),
+          ("된장찌개", ["된장", "두부", "애호박", "감자", "양파"], "멸치 육수에 된장을 풀고 감자와 애호박을 넣어 끓인 뒤 두부를 넣는다."),
+          ("제육볶음", ["돼지고기", "고추장", "양파", "대파", "마늘"], "돼지고기를 고추장 양념에 재운 뒤 센불에서 양파와 함께 볶는다."),
+          ("두부샐러드", ["두부", "양상추", "방울토마토", "올리브유", "소금"], "두부의 물기를 빼고 깍둑 썰어 채소와 함께 드레싱에 버무린다."),
+          ("김치찌개", ["배추김치", "돼지고기", "두부", "대파", "고춧가루"], "김치와 돼지고기를 볶다가 물을 붓고 끓인 뒤 두부와 대파를 넣는다."),
+          ("대파계란국", ["대파", "계란", "국간장", "멸치육수", "소금"], "멸치 육수를 끓이고 국간장으로 간한 뒤 계란을 풀고 대파를 넣는다."),
+          ("두부부침", ["두부", "계란", "밀가루", "소금", "식용유"], "두부에 밀가루와 계란물을 입혀 기름 두른 팬에 앞뒤로 노릇하게 부친다.")]
+candidates = []
+for index, (name, ingredients, step) in enumerate(dishes, 1):
+    candidates.append({"candidateId": index, "name": name, "ingredients": [[number, item] for number, item in enumerate(ingredients, 1)],
+                       "steps": [step, step], "stepCount": 4,
+                       "tasteContext": {"cookingEvidence": [step], "seasonings": ingredients[1:4]},
+                       "preferenceEvidenceOptions": [item for item in ingredients if item in ("고추장", "고춧가루")] + [step]})
+context = {"preferenceTags": ["매운거", "담백한거"], "ingredientColumns": ["ingredientNo", "name"], "contextReasonsWanted": False,
+           "recommendationContext": {"season": "AUTUMN", "mealTime": "DINNER"}, "candidates": candidates, "executionBudgetSeconds": 60.0}
+
+
+async def main() -> None:
+    subject = RecipeTextReasoner(get_settings())
+    started = time.perf_counter()
+    try:
+        await subject.reason(RecipeAiRequest(stage="RANK", context=context))
+        print(f"레시피 판단 예열 완료: {time.perf_counter() - started:.1f}s", flush=True)
+    finally:
+        await subject.close()
+
+asyncio.run(main())
+PY
+    fi
+
     python -m uvicorn gpu_worker.main:app \
         --host 0.0.0.0 \
         --port "${WORKER_PORT:-9000}" \

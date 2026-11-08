@@ -205,10 +205,10 @@ requiredAmount = amountValue × targetServings ÷ (baseServings 또는 1)
 ### 취향 결과 / 대체 추천 (v25)
 
 - 취향 태그가 있으면 요약 `preferenceMatch=MATCHED`인 레시피만 `recommendations`에 넣는다. 취향 미확인(UNKNOWN) / 불일치 후보는 `confirmationCandidates`에도 넣지 않는다.
-- 맞는 레시피가 하나도 없으면 응답 전에 취향 조건으로 웹 보충(Tavily)을 한 번 기다리고 새 후보를 Gemma로 다시 판정한다. 보충은 최대 16초(`RECIPE_PREFERENCE_SUPPLY_TIMEOUT_SECONDS`)이며 재판정 시간 8초를 남긴다. 그만큼 시간이 남지 않았거나 이미 후보 부족으로 보충했다면 생략하고 `PREFERENCE_WEB_SUPPLY_SKIPPED`를 붙인다. 보충 결과가 있으면 `PREFERENCE_WEB_SUPPLY_USED`.
+- 맞는 레시피가 하나도 없으면(v25.1) 응답을 기다리게 하지 않는다. 취향 조건 웹 보충(Tavily + Gemma 추출)을 백그라운드로 한 번 시작하고(`PREFERENCE_WEB_SUPPLY_DEFERRED`, 다른 보충이 실행 중이면 생략) 이번 응답은 대체 추천으로 바로 끝낸다. 찾은 레시피는 프로세스 메모리에 1시간 보관돼 다음 추천 요청의 후보로 판정된다. 이 대체 추천 응답은 결과 캐시에 저장하지 않으므로 같은 조건으로 다시 요청하면 새로 판정한다. 웹 검색 키가 없거나 AI가 꺼져 있으면 보충을 시작하지 않는다.
 - 그래도 없으면 취향과 무관하게 임박 활용 / 날씨 / 시간대 순서로 추천하고 다음을 반환한다. 각 항목의 `preferenceMatch`는 MATCHED가 아닌 실제 판정을 유지한다.
   - `preferenceResult`: `NOT_REQUESTED`(취향 없음) / `MATCHED`(취향 일치 추천) / `NOT_FOUND`(대체 추천)
-  - `notice`: NOT_FOUND일 때 `선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요.` 대체 추천도 없으면 `선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요.` 그 밖에는 null. **백엔드 / 앱은 이 문구를 목록 위에 표시한다.**
+  - `notice`: NOT_FOUND일 때 `선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요.` 웹 보충을 시작했으면 뒤에 ` 취향에 맞는 레시피를 웹에서 더 찾고 있어요. 잠시 후 다시 추천받으면 반영돼요.`가 붙는다. 대체 추천도 없으면 `선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요.` 그 밖에는 null. **백엔드 / 앱은 이 문구를 목록 위에 표시한다.**
   - 경고 `PREFERENCE_MATCH_NOT_FOUND`
 - 날씨는 사용자에게 표시하지 않는다. 취향이 없거나 NOT_FOUND일 때만 순서에 반영한다.
 

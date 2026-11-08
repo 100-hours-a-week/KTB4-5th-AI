@@ -79,7 +79,9 @@ class RecipeResultCache:
         failed_rank = {"AI_UNAVAILABLE_OR_INVALID", "AI_CIRCUIT_OPEN", "AI_PREFERENCE_EVIDENCE_REJECTED"}.intersection(result.warnings)
         failed_fallback = result.recommendationEngine != "AI" and {"EXTERNAL_REPLENISHMENT_UNAVAILABLE", "WEB_SEARCH_UNAVAILABLE",
                                                                   "RECIPE_SUPPLY_BUDGET_EXHAUSTED"}.intersection(result.warnings)
-        if (result.recommendations or result.confirmationCandidates) and not failed_rank and not failed_fallback:
+        # 취향 웹 보충을 백그라운드로 시작한 대체 추천은 고정하지 않는다. 다음 요청이 찾은 레시피를 판정해야 한다.
+        searching = "PREFERENCE_WEB_SUPPLY_DEFERRED" in result.warnings
+        if (result.recommendations or result.confirmationCandidates) and not failed_rank and not failed_fallback and not searching:
             self.entries[key] = (monotonic() + self.ttl, result.model_copy(deep=True))
             self.entries.move_to_end(key)
             while len(self.entries) > self.max_size:

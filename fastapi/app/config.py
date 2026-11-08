@@ -56,8 +56,6 @@ class Settings(BaseSettings):
     recipe_ai_rank_timeout_seconds: float = Field(default=20, ge=2, le=60)
     recipe_worker_transport_margin_seconds: float = Field(default=2, ge=0.1, le=5)
     recipe_supply_timeout_seconds: float = Field(default=8, ge=1, le=20)
-    # 취향 일치가 없을 때 응답 전에 기다리는 웹 보충 시간이다. 검색과 Gemma 본문 추출(최대 16초)을 포함한다.
-    recipe_preference_supply_timeout_seconds: float = Field(default=16, ge=1, le=30)
     recipe_supply_background_timeout_seconds: float = Field(default=30, ge=1, le=120)
     recipe_ai_input_max_bytes: int = Field(default=16000, ge=4000, le=24000)
     recipe_taste_profiles_enabled: bool = True

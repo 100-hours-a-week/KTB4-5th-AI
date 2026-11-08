@@ -41,11 +41,9 @@ logger = logging.getLogger(__name__)
 DEFERRED_RECIPE_TTL_SECONDS = 3600
 DEFERRED_RECIPE_MAX_ENTRIES = 200
 # 취향 웹 보충은 검색 / 추출 / 재판정 시간이 남아 있을 때만 기다린다.
-# 웹 보충 뒤 새 후보를 다시 판정할 시간을 남긴다. 남은 시간이 보충 최소 시간 + 이 값보다 적으면 보충하지 않는다.
-PREFERENCE_RANK_RESERVE_SECONDS = 8
-PREFERENCE_SUPPLY_MIN_SECONDS = 4
 PREFERENCE_NOT_FOUND_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요."
 PREFERENCE_AND_FALLBACK_EMPTY_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요."
+PREFERENCE_SEARCHING_NOTICE = " 취향에 맞는 레시피를 웹에서 더 찾고 있어요. 잠시 후 다시 추천받으면 반영돼요."
 
 
 class RecipeService:
@@ -351,44 +349,24 @@ class RecipeService:
 
             assess_preferences(baseline)
             diagnostics["matchedAfterFirstRank"] = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
-            # 취향에 맞는 레시피가 없으면 응답 전에 취향 조건으로 웹 보충을 한 번 기다리고 새 후보를 다시 판정한다.
+            # 취향에 맞는 레시피가 없으면 응답을 기다리게 하지 않는다. 취향 조건 웹 보충을 백그라운드로 한 번 시작하고
+            # 찾은 레시피는 다음 추천 요청의 후보로 판정한다(_deferred_candidates). 이번 응답은 대체 추천으로 바로 끝낸다.
+            preference_supply_started = False
             if request.preferenceTags and names and not preference_found():
-                before = {(row["source"], row["sourceRecipeId"]) for row in ranked}
                 focus_names = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches) or search_names[:2]
-                supply_until = min(monotonic() + self.settings.recipe_preference_supply_timeout_seconds, deadline - PREFERENCE_RANK_RESERVE_SECONDS)
-                diagnostics["preferenceSupplyBudgetMs"] = round(max(0.0, supply_until - monotonic()) * 1000, 3)
-                if supply_used or supply_until - monotonic() < PREFERENCE_SUPPLY_MIN_SECONDS:
-                    ranker.warnings.append("PREFERENCE_WEB_SUPPLY_SKIPPED")
-                    diagnostics["preferenceSupply"] = "SKIPPED_ALREADY_SUPPLIED" if supply_used else "SKIPPED_NO_TIME"
+                if supply_used:
+                    diagnostics["preferenceSupply"] = "SKIPPED_ALREADY_SUPPLIED"
+                elif not self.settings.recipe_tavily_api_key or not self.settings.recipe_ai_enabled:
+                    # 웹 검색 키가 없거나 AI가 꺼져 있으면 찾은 레시피를 판정할 수 없으므로 시작하지 않는다.
+                    diagnostics["preferenceSupply"] = "NOT_CONFIGURED"
+                elif self._defer_supply(focus_names, search_names, request.preferenceTags, False, usable):
+                    preference_supply_started = True
+                    ranker.warnings.append("PREFERENCE_WEB_SUPPLY_DEFERRED")
+                    diagnostics["preferenceSupply"] = "DEFERRED"
                 else:
-                    supplying = monotonic()
-                    supplied_any = await supplement(focus_names, allow_food_safety=False, until=supply_until)
-                    spent("preferenceSupplyMs", supplying)
-                    diagnostics["preferenceSupply"] = "ADDED" if supplied_any else "NO_NEW_RECIPE"
-                    if supplied_any:
-                        ranker.warnings.append("PREFERENCE_WEB_SUPPLY_USED")
-                        added = [row for row in baseline if (row["source"], row["sourceRecipeId"]) not in before]
-                        diagnostics["preferenceSupplyAdded"] = len(added)
-                        # 기존 후보의 판정은 캐시에서 복원되므로 새로 들어온 레시피만 다시 판정한다.
-                        window = added[:min(12, self.settings.recipe_ai_max_candidates)]
-                        ranker.timeout = max(0.1, min(self.settings.recipe_ai_rank_timeout_seconds, deadline - monotonic()))
-                        if self.settings.recipe_ai_enabled and window:
-                            # 재판정은 상황 판단을 새로 받으므로, 이번 창에 없는 후보의 이전 상황 판단은 보존한다.
-                            earlier = dict(ranker.context_factors)
-                            calls_before, ranking = ranker.calls, monotonic()
-                            second = await ranker.rank(context, window)
-                            spent("secondRankMs", ranking)
-                            diagnostics["secondRankCalls"] = ranker.calls - calls_before
-                            diagnostics["secondRankResult"] = "OK" if second is not None else "FAILED"
-                            for identity, factors in earlier.items():
-                                ranker.context_factors.setdefault(identity, factors)
-                            if second is not None:
-                                selected, shortlist = second, window
-                    # 보충은 새 후보가 없어도 후보 목록을 다시 만들므로 항상 다시 판정한다.
-                    ranker.hydrate(context, baseline)
-                    assess_preferences(baseline)
-                    diagnostics["matchedAfterSupply"] = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
-            # 웹 보충 뒤에도 맞는 레시피가 없으면 취향과 무관하게 추천하고 찾지 못했다고 알린다.
+                    # 다른 요청의 보충이 이미 실행 중이다. GPU 경합을 막기 위해 한 번에 하나만 돌린다.
+                    diagnostics["preferenceSupply"] = "BUSY"
+            # 맞는 레시피가 없으면 취향과 무관하게 추천하고 찾지 못했다고 알린다.
             preference_fallback = bool(request.preferenceTags) and not preference_found()
             confirmation_rows = build_baseline(ranked, matched_request, confirmation_only=True)
             assess_preferences(confirmation_rows)
@@ -519,7 +497,8 @@ class RecipeService:
                                           generatedAt=datetime.now(UTC), recommendationEngine=engine,
                                           warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
-                                          notice=(PREFERENCE_NOT_FOUND_NOTICE if result else PREFERENCE_AND_FALLBACK_EMPTY_NOTICE) if preference_fallback else None,
+                                          notice=((PREFERENCE_NOT_FOUND_NOTICE if result else PREFERENCE_AND_FALLBACK_EMPTY_NOTICE)
+                                                  + (PREFERENCE_SEARCHING_NOTICE if preference_supply_started else "")) if preference_fallback else None,
                                           context=context["recommendationContext"],
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
                                                  "tasteProfileCount": used_profiles,

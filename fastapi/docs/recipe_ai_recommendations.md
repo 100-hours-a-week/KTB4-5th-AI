@@ -197,7 +197,7 @@ python -m app.recipes.profile_backfill --source HANSIK_PRECISION --limit 100 --a
 ## v25 취향 우선 / 웹 보충 / 대체 추천
 
 1. 취향 태그가 있으면 모든 맛 태그가 확인된(MATCHED) 레시피만 추천한다. 미확인 / 불일치 후보는 확인 후보로도 내보내지 않는다. 백엔드가 확인 후보를 목록에 합쳐 보여주더라도 취향과 무관한 레시피가 섞이지 않게 하기 위해서다.
-2. 맞는 레시피가 없으면 응답 전에 취향 태그를 넣은 웹 보충을 한 번 기다린다. 이전에는 백그라운드로 미뤄 다음 요청에만 반영했다. 새 후보가 생기면 RANK를 한 번 더 호출해 다시 판정하므로, 이 경우 GPU 호출은 최대 2회이고 응답이 늦어질 수 있다(웹 보충 최대 `RECIPE_PREFERENCE_SUPPLY_TIMEOUT_SECONDS`=16초 + 재판정). 재판정에 8초를 남기지 못하면 보충하지 않는다. 재판정에 없는 후보의 상황 판단은 1차 판정 값을 유지한다.
+2. 맞는 레시피가 없으면 취향 태그를 넣은 웹 보충을 **백그라운드로** 한 번 시작하고 응답은 바로 대체 추천으로 끝낸다(v25.1). 응답 전에 기다리면 웹 검색 / 페이지 수집 / 추출로 최대 16초가 더 걸렸다(2026-11-07 dev 실측 22.8초 중 GPU 약 5초). 찾은 레시피는 다음 요청에서 판정하며, 이 대체 추천은 결과 캐시에 넣지 않는다.
 3. 그래도 없으면 `preferenceResult=NOT_FOUND`, `notice` 안내 문구와 함께 취향과 무관한 추천을 반환한다. 이때 날씨 / 시간대 판단으로 순서를 정한다.
 4. 날씨는 화면에 보이지 않는 순서 판단용 정보다. `reason`에 날씨 문장을 붙이지 않는다.
 
@@ -234,3 +234,5 @@ dev Pod(RTX A5000, `gemma4:e2b` Q4_K_M, num_ctx 32768, 100% GPU)에서 측정했
 - Worker는 `contextReasonsWanted`가 없으면 기존처럼 상황 이유를 받는다. 이번 변경은 FastAPI와 Worker를 함께 배포해야 효과가 난다. 순서는 FastAPI 먼저.
 - **원인 확인(2026-11-07 밤)**: Pod의 CPU 할당은 약 7.6개(`cpu.cfs_quota_us=765000`)인데 컨테이너 안에서는 96개로 보여 `llama-server`가 스레드 151개로 실행됐다. 할당 초과로 CPU 제한이 반복돼(`nr_throttled` 895회) 생성 속도가 16~52토큰/초로 흔들렸고, 같은 RANK 요청이 6초 성공 / 19초 시간 초과로 갈렸다. 같은 Pod에서 `num_thread=6`으로 바꾸면 JSON 스키마 출력 생성이 167~175토큰/초(기본 33~45)로 약 4~5배 빨라졌다.
 - **조치**: Worker `start.sh`가 cgroup 할당량 - 1(최소 1)을 `OLLAMA_NUM_THREAD`로 내보내고, 예열 / 레시피 / 이미지 분석의 모든 Ollama 호출이 `ollama_runtime_options()`로 같은 `num_ctx` / `num_thread`를 보낸다. 값이 호출마다 다르면 Ollama가 모델을 다시 적재한다(실측 약 22초). 수동으로 정하려면 `OLLAMA_NUM_THREAD` 환경 변수를 넣는다.
+
+- **예열(2026-11-07)**: 짧은 문장 예열 뒤 첫 실제 RANK에서 입력 처리에 약 17초가 더 걸렸다. `start.sh`가 uvicorn 시작 전에 실제 경로(`RecipeTextReasoner`, JSON 스키마, 같은 `num_ctx` / `num_thread`, 후보 8개 입력)로 RANK를 한 번 실행한다. 실패해도 Worker는 시작한다. `WARM_RECIPE_RANK_ON_START=false`로 끌 수 있다.
