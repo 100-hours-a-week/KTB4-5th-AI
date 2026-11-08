@@ -35,7 +35,7 @@ MAIN_COMPONENTS = {name for name in MAIN_NAMES if len(name) >= 2} | {"새우", "
 
 
 # 이름·제목별 정적 판정을 캐시한다. 미검토 재료를 부재료나 양념이라고 추측하지 않는다.
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=65536)
 def ingredient_role(title: str, name: str) -> tuple[str, str]:
     key = canonical(name)
     if key in WATER_NAMES:

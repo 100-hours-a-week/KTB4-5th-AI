@@ -3,6 +3,7 @@ import json
 import re
 import unicodedata
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -15,6 +16,8 @@ Strategy = Literal["USE_EXPIRING", "MINIMIZE_SHOPPING", "SIMPLE_COOKING"]
 
 
 # 재료 문자열을 NFKC·소문자·공백 제거로 정규화한다. 의미상 동의어를 임의로 생성하지 않는다.
+# 순수 문자열 변환이라 결과를 기억한다. 추천 1건에 같은 재료명을 수십만 번 정규화했다(후보 684개 실측).
+@lru_cache(maxsize=65536)
 def normalize(value: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).casefold())
 

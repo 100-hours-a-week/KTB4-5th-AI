@@ -1,6 +1,7 @@
 """추천 재료 별칭과 제외 조건. 벡터 병합은 비교 실험에서만 사용한다."""
 
 import re
+from functools import lru_cache
 
 from app.recipes.schemas import Recipe, normalize
 
@@ -46,6 +47,7 @@ def ingredient_family(name: str) -> str | None:
 
 
 # 공백·유니코드와 검토된 용도 표제를 정규화한 뒤 같은 재료의 별칭만 치환한다.
+@lru_cache(maxsize=65536)
 def canonical(name: str) -> str:
     normalized = SECTION_PREFIX.sub("", normalize(name), count=1)
     return ALIASES.get(normalized, normalized)
@@ -90,6 +92,9 @@ def query_variants(names: list[str]) -> list[str]:
 
 # 원문·별칭의 부분 문자열을 함께 검사한다. 계란 제외가 달걀노른자를 놓치지 않도록 한다.
 def is_excluded(name: str, excluded: list[str]) -> bool:
+    # 제외 재료가 없으면 후보 재료마다 별칭 목록을 만들 필요가 없다.
+    if not excluded:
+        return False
     exclusions = variants([value for value in excluded if normalize(value)])
     for value in excluded:
         family = ingredient_family(value)
