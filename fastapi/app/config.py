@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     recipe_supply_background_timeout_seconds: float = Field(default=30, ge=1, le=120)
     recipe_ai_input_max_bytes: int = Field(default=16000, ge=4000, le=24000)
     recipe_taste_profiles_enabled: bool = True
+    # 추천 후보 중 맛 평가가 없는 DB 레시피를 한가할 때 백그라운드로 평가해 저장한다(요청당 최대 개수, 직전 요청 뒤 대기 초).
+    recipe_background_profile_enabled: bool = True
+    recipe_background_profile_per_request: int = Field(default=6, ge=0, le=20)
+    recipe_background_profile_idle_seconds: float = Field(default=30, ge=0, le=600)
+    # 취향 일치가 이 수보다 적으면 다른 추천으로 남은 칸을 채우고 취향 웹 보충을 백그라운드로 시작한다.
+    recipe_preference_fill_below: int = Field(default=10, ge=0, le=10)
+    recipe_preference_supply_below: int = Field(default=3, ge=0, le=10)
     recipe_ai_max_candidates: int = Field(default=20, ge=3, le=20)
     recipe_queue_maxsize: int = Field(default=100, ge=1, le=100)
     recipe_consumer_count: int = Field(default=2, ge=1, le=4)

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
@@ -32,7 +33,7 @@ from app.recipes.schemas import Recipe, RecommendationRequest, RecommendationRes
 from app.recipes.selection import preference_candidates, select_recommendations
 from app.recipes.stock_names import stock_ingredient
 from app.recipes.suitability import DEFAULT_PANTRY_NAMES, WATER_NAMES, assess_suitability, ingredient_role
-from app.recipes.taste_profiles import preference_decisions
+from app.recipes.taste_profiles import preference_decisions, profile_context, validate_profile
 from app.recipes.taste_repository import TasteProfileRepository
 from app.recipes.weather import WeatherService
 from app.recipes.web_provider import WebRecipeProvider
@@ -44,6 +45,10 @@ DEFERRED_RECIPE_MAX_ENTRIES = 200
 PREFERENCE_NOT_FOUND_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못해 지금 재료로 만들 수 있는 다른 요리를 추천해요."
 PREFERENCE_AND_FALLBACK_EMPTY_NOTICE = "선택한 취향에 맞는 레시피를 찾지 못했고, 지금 재료로 추천할 수 있는 다른 요리도 없어요."
 PREFERENCE_SEARCHING_NOTICE = " 취향에 맞는 레시피를 웹에서 더 찾고 있어요. 잠시 후 다시 추천받으면 반영돼요."
+PREFERENCE_PARTIAL_NOTICE = "선택한 취향에 맞는 레시피는 {count}개예요. 나머지는 지금 재료로 만들 수 있는 다른 요리예요."
+PREFERENCE_FILLED_REASON = " 취향에 맞는 레시피가 적어 함께 추천한 요리입니다."
+PROFILE_QUEUE_MAX = 200
+PROFILE_ATTEMPTED_MAX = 5000
 
 
 class RecipeService:
@@ -64,6 +69,68 @@ class RecipeService:
         self.cache = RecipeResultCache(settings.reference_cache_max_size, settings.recipe_cache_ttl_seconds)
         self._deferred_supply: set[asyncio.Task] = set()
         self._deferred_recipes: dict[tuple[str, str], tuple[float, Recipe]] = {}
+        # 맛 평가가 없는 DB 레시피를 한가할 때 하나씩 평가한다. 사용자 요청이 진행 중이면 GPU를 양보한다.
+        self._active_requests = 0
+        self._last_request_at = 0.0
+        self._profile_queue: OrderedDict[tuple[str, str], Recipe] = OrderedDict()
+        self._profile_attempted: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._profile_task: asyncio.Task | None = None
+        self._profile_disabled_until = 0.0
+        self.profile_counts = {"saved": 0, "reused": 0, "skipped": 0, "failed": 0}
+
+    # 추천 후보 중 맛 평가가 없는 레시피를 평가 대기열에 넣는다. 한 번 시도한 레시피는 다시 넣지 않는다.
+    def _queue_profiles(self, recipes: list[Recipe]) -> int:
+        if (not self.settings.recipe_background_profile_enabled or not self.settings.recipe_ai_enabled or not self.settings.recipe_taste_profiles_enabled
+                or monotonic() < self._profile_disabled_until):
+            return 0
+        queued = 0
+        for recipe in recipes:
+            if queued >= self.settings.recipe_background_profile_per_request or len(self._profile_queue) >= PROFILE_QUEUE_MAX:
+                break
+            identity = (recipe.source, recipe.sourceRecipeId)
+            if identity in self._profile_attempted or identity in self._profile_queue:
+                continue
+            self._profile_queue[identity] = recipe
+            queued += 1
+        if self._profile_queue and (self._profile_task is None or self._profile_task.done()):
+            self._profile_task = asyncio.create_task(self._run_profiles())
+        return queued
+
+    # 직전 요청 뒤 일정 시간 한가할 때만 하나씩 평가한다. 저장 테이블이 없으면 1시간 동안 멈춘다.
+    async def _run_profiles(self) -> None:
+        while self._profile_queue:
+            idle = monotonic() - self._last_request_at
+            if self._active_requests or self._deferred_supply or idle < self.settings.recipe_background_profile_idle_seconds:
+                await asyncio.sleep(max(0.5, self.settings.recipe_background_profile_idle_seconds - idle))
+                continue
+            identity, recipe = self._profile_queue.popitem(last=False)
+            self._profile_attempted[identity] = None
+            while len(self._profile_attempted) > PROFILE_ATTEMPTED_MAX:
+                self._profile_attempted.popitem(last=False)
+            try:
+                row = recipe.model_dump(mode="json")
+                if await self.taste_profiles.load_many([row], self.settings.ollama_model):
+                    self.profile_counts["reused"] += 1
+                    continue
+                context = profile_context(row)
+                context["executionBudgetSeconds"] = 30
+                async with asyncio.timeout(35):
+                    profile, model = await self.reasoner.profile(context)
+                if model != self.settings.ollama_model:
+                    raise ValueError("TASTE_PROFILE_MODEL_MISMATCH")
+                saved = await self.taste_profiles.save(recipe, validate_profile(row, profile), model)
+                self.profile_counts["saved" if saved else "skipped"] += 1
+            except asyncio.CancelledError:
+                raise
+            except DependencyUnavailable:
+                self._profile_queue.clear()
+                self._profile_disabled_until = monotonic() + 3600
+                logger.warning("recipe_background_profile_store_unavailable")
+                return
+            except Exception as exc:
+                self.profile_counts["failed"] += 1
+                logger.warning("recipe_background_profile_failed error_type=%s", type(exc).__name__)
+        logger.info("recipe_background_profile_idle counts=%s", json.dumps(self.profile_counts, separators=(",", ":")))
 
     # 후보가 이미 있는 요청은 보충을 기다리지 않는다. GPU 경합을 막기 위해 한 번에 하나만 실행하고 나머지는 다음 요청에 맡긴다.
     def _defer_supply(self, focus: list[str], companions: list[str], tags: list[str], allow_food_safety: bool, usable: Callable[[Recipe], bool]) -> bool:
@@ -100,7 +167,12 @@ class RecipeService:
     # 재료 이름·제외 목록·날짜별 캐시를 검증하고 확정 재고 기반 추천을 반환한다.
     async def recommend(self, request: RecommendationRequest) -> RecommendationResponse:
         with recipe_trace(request.requestId):
-            return await self._recommend(request)
+            self._active_requests += 1
+            try:
+                return await self._recommend(request)
+            finally:
+                self._active_requests -= 1
+                self._last_request_at = monotonic()
 
     # 기존 추천 처리와 캐시 경계를 유지한다.
     async def _recommend(self, request: RecommendationRequest) -> RecommendationResponse:
@@ -167,6 +239,7 @@ class RecipeService:
             candidates = [recipe for recipe in [*self._deferred_candidates(), *found] if usable(recipe)]
             searches = 1 if names else 0
             candidates = list({(r.source, r.sourceRecipeId): r for r in candidates}.values())
+            recipe_index = {(r.source, r.sourceRecipeId): r for r in candidates}
             search_names = list(dict.fromkeys(item.name for item in sorted(inventory, key=lambda item: (item.expirationDate, item.ingredientId))))
             source = "DATABASE"
             external_searched = False
@@ -264,6 +337,7 @@ class RecipeService:
                 for recipe in supplied.recipes:
                     if usable(recipe):
                         merged[(recipe.source, recipe.sourceRecipeId)] = score_candidate(recipe)
+                        recipe_index[(recipe.source, recipe.sourceRecipeId)] = recipe
                         added = True
                 ranked = list(merged.values())
                 await attach_profiles(ranked)
@@ -348,11 +422,16 @@ class RecipeService:
                 return any(row.get("preferenceMatch") == "MATCHED" for row in baseline)
 
             assess_preferences(baseline)
-            diagnostics["matchedAfterFirstRank"] = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
+            matched_count = sum(row.get("preferenceMatch") == "MATCHED" for row in baseline)
+            diagnostics["matchedAfterFirstRank"] = matched_count
+            # 맛 평가가 없는 후보를 한가할 때 평가해 두면 다음 취향 요청은 GPU 판단 없이 저장 평가로 끝난다.
+            unprofiled = [recipe_index[key] for key in dict.fromkeys((row["source"], row["sourceRecipeId"]) for row in [*shortlist, *baseline]
+                                                                     if not row.get("tasteProfile")) if key in recipe_index]
+            diagnostics["profileQueued"] = self._queue_profiles(unprofiled)
             # 취향에 맞는 레시피가 없으면 응답을 기다리게 하지 않는다. 취향 조건 웹 보충을 백그라운드로 한 번 시작하고
             # 찾은 레시피는 다음 추천 요청의 후보로 판정한다(_deferred_candidates). 이번 응답은 대체 추천으로 바로 끝낸다.
             preference_supply_started = False
-            if request.preferenceTags and names and not preference_found():
+            if request.preferenceTags and names and matched_count < max(1, self.settings.recipe_preference_supply_below):
                 focus_names = preference_search_focus(inventory, baseline, request.preferenceTags, ranker.preference_matches) or search_names[:2]
                 if supply_used:
                     diagnostics["preferenceSupply"] = "SKIPPED_ALREADY_SUPPLIED"
@@ -413,6 +492,7 @@ class RecipeService:
                 row["_urgentInventoryNames"] = {item.ingredientId: item.name for item in inventory}
             eligible, _ = preference_candidates(ordered, matched_request)
             selection_request = matched_request
+            preference_filled = False
             if preference_fallback:
                 # 취향 판정을 무시하고 임박 활용 / 상황 판단 순서로 고른다. 확인된 불일치는 미확인보다 뒤에 둔다.
                 eligible = list(ordered)
@@ -423,6 +503,16 @@ class RecipeService:
                 selection_request = matched_request.model_copy(update={"preferenceTags": []})
                 confirmations = confirmation_rows[:3]
                 ranker.warnings.extend(["PREFERENCE_MATCH_COUNT_BELOW_LIMIT", "PREFERENCE_MATCH_NOT_FOUND"])
+            elif request.preferenceTags and len(eligible) < min(request.limit, self.settings.recipe_preference_fill_below):
+                # 취향 일치가 적으면 일치 레시피를 모두 앞에 두고 남은 칸을 다른 추천으로 채운다. 확인된 불일치는 미확인보다 뒤에 둔다.
+                preference_filled = True
+                eligible = list(ordered)
+                for row in eligible:
+                    statuses = [item["status"] for item in row.get("preferenceAssessments", [])]
+                    row["_fallbackRank"] = (0 if row.get("preferenceMatch") == "MATCHED" else 1, -statuses.count("MATCHED"), statuses.count("NOT_MATCHED"))
+                selection_request = matched_request.model_copy(update={"preferenceTags": []})
+                confirmations = []
+                ranker.warnings.extend(["PREFERENCE_MATCH_COUNT_BELOW_LIMIT", "PREFERENCE_RESULTS_FILLED"])
             elif request.preferenceTags:
                 if len(eligible) < request.limit:
                     ranker.warnings.append("PREFERENCE_MATCH_COUNT_BELOW_LIMIT")
@@ -438,6 +528,11 @@ class RecipeService:
             if preference_fallback:
                 for row in result:
                     row["reason"] += " 선택한 취향에 맞는 레시피를 찾지 못해 대신 추천한 요리입니다."
+            if preference_filled:
+                for row in result:
+                    if row.get("preferenceMatch") != "MATCHED":
+                        row["reason"] += PREFERENCE_FILLED_REASON
+            filled_count = sum(row.get("preferenceMatch") != "MATCHED" for row in result) if preference_filled else 0
             if len(result) < request.limit:
                 ranker.warnings.append("CANDIDATE_COUNT_BELOW_REQUEST_LIMIT")
             if any(row["missingIngredients"] for row in result):
@@ -467,7 +562,7 @@ class RecipeService:
             timings = {"databaseSearchMs": round(database_ms, 3), "initialCandidateEvaluationMs": round(validation_ms, 3),
                        "webExtractionMs": round(sum(report.extraction_ms for report in web_reports), 3),
                        "aiRankMs": round(ranker.duration_ms, 3), **stage_ms, "recommendationMs": round((monotonic() - started) * 1000, 3)}
-            diagnostics.update(preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
+            diagnostics.update(filledCount=filled_count, preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
                                returnedCount=len(result), returnedMatched=sum(row.get("preferenceMatch") == "MATCHED" for row in result),
                                situationUsed=sum(bool(row.get("contextFactors")) for row in result),
                                weather=(context["recommendationContext"].get("weather") or {}).get("temperatureBand"),
@@ -498,7 +593,9 @@ class RecipeService:
                                           warnings=list(dict.fromkeys(ranker.warnings)), preferenceTags=request.preferenceTags,
                                           preferenceResult="NOT_REQUESTED" if not request.preferenceTags else "NOT_FOUND" if preference_fallback else "MATCHED",
                                           notice=((PREFERENCE_NOT_FOUND_NOTICE if result else PREFERENCE_AND_FALLBACK_EMPTY_NOTICE)
-                                                  + (PREFERENCE_SEARCHING_NOTICE if preference_supply_started else "")) if preference_fallback else None,
+                                                  + (PREFERENCE_SEARCHING_NOTICE if preference_supply_started else "")) if preference_fallback else
+                                                 (PREFERENCE_PARTIAL_NOTICE.format(count=len(result) - filled_count)
+                                                  + (PREFERENCE_SEARCHING_NOTICE if preference_supply_started else "")) if filled_count else None,
                                           context=context["recommendationContext"],
                                           trace={"policyVersion": POLICY_VERSION, "model": ranker.model, "promptVersion": PROMPT_VERSION if evaluated_by_ai else None,
                                                  "tasteProfileCount": used_profiles,
@@ -535,6 +632,9 @@ class RecipeService:
         for task in list(self._deferred_supply):
             task.cancel()
         await asyncio.gather(*self._deferred_supply, return_exceptions=True)
+        if self._profile_task is not None:
+            self._profile_task.cancel()
+            await asyncio.gather(self._profile_task, return_exceptions=True)
         await self.weather.close()
         await self.repository.close()
         await self.reasoner.close()
