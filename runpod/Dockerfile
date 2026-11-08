@@ -1,6 +1,8 @@
 FROM python:3.11-slim
 
 ARG OLLAMA_VERSION=0.34.3
+# GitHub 릴리스 자산(ollama-linux-amd64.tar.zst)의 sha256. 버전을 바꾸면 함께 바꾼다.
+ARG OLLAMA_SHA256=e83a089fd0cd2f79ee2933cca2085846a2065f497adbc6467c402177c68423f9
 ARG PADDLE_CUDA_VARIANT=cu126
 ARG TORCH_CUDA_VARIANT=cu126
 
@@ -13,7 +15,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git libgl1 libglib2.0-0 libgomp1 zstd \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="${OLLAMA_VERSION}" sh
+    # ollama.com/install.sh는 항상 최신 스크립트라 .tar.zst 확인이 실패하면 없는 .tgz로 넘어가 빌드가 깨졌다(2026-11-08).
+    # 고정 버전의 GitHub 릴리스 자산을 직접 받아 체크섬을 확인한다. 압축 안의 bin/ollama, lib/ollama가 /usr/local 아래에 풀린다.
+    # GitHub 릴리스 CDN이 큰 자산에 504를 간헐적으로 낸다(2026-11-08 실측). 모든 오류를 재시도한다.
+    && curl -fsSL --retry 8 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+    && echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
+    && zstd -d -c /tmp/ollama.tar.zst | tar -x -C /usr/local \
+    && rm -f /tmp/ollama.tar.zst \
+    && test -x /usr/local/bin/ollama
 
 WORKDIR /app
 
