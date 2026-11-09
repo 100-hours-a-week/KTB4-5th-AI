@@ -298,7 +298,9 @@ class GpuInferenceEngine:
             diagnostics.llm_eval_duration_ns = (diagnostics.llm_eval_duration_ns or 0) + (current.llm_eval_duration_ns or 0)
             diagnostics.llm_load_duration_ns = (diagnostics.llm_load_duration_ns or 0) + (current.llm_load_duration_ns or 0)
             diagnostics.warnings.extend(current.warnings)
-            for candidate in candidates[:1]:
+            # YOLO가 상품을 2개 이상 나누지 못하면 사진 전체가 crop 하나로 온다. 이때는 냉장고 칸처럼
+            # 한 장에 여러 재료가 있을 수 있으므로 모델이 찾은 항목을 모두 남긴다. 분리된 crop은 상품 하나다.
+            for candidate in candidates if len(crops) == 1 else candidates[:1]:
                 line_no = max((line.line_no for line in output_lines), default=0) + 1
                 normalized_name = self._prefer_ocr_product_name(candidate.normalized_name, hints[result_index] if result_index < len(hints) else "")
                 category = known_food_category(normalized_name) or candidate.category
