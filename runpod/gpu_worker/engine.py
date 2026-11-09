@@ -71,20 +71,20 @@ class GpuInferenceEngine:
         if type(budget) not in (int, float) or not math.isfinite(budget) or not 0 < budget <= 60:
             raise ModelUnavailable("레시피 실행 시간 예산이 올바르지 않습니다.")
         started = phase_started = perf_counter()
-        phase, outcome = "worker_slot_wait", "error"
+        phase, outcome = "llm_slot_wait", "error"
         latency("worker_started", stage=request.stage, budget_seconds=budget)
         try:
             async with asyncio.timeout(budget):
-                async with self._inference_semaphore:
-                    latency("worker_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
-                    phase, phase_started = "llm_slot_wait", perf_counter()
-                    async with self._llm_semaphore.slot(RECIPE_BACKGROUND.get()):
-                        latency("llm_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
-                        logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter()-started)*1000)
-                        phase, phase_started = "model", perf_counter()
-                        result = await self._recipe_reasoner.reason(request)
-                        outcome = "success"
-                        return result
+                # 레시피 판단은 OCR / 이미지 모델 없이 LLM만 쓰므로 LLM 슬롯만 잡는다. 전체 처리 슬롯을 먼저 잡으면
+                # 대기 중인 백그라운드 호출이 그 슬롯을 막아 사용자 요청이 우선순위 게이트에 닿지 못했다(dev 실측).
+                # 잠금을 하나만 잡으므로 사진 분석(처리 슬롯 → LLM 슬롯)과 교착하지 않는다.
+                async with self._llm_semaphore.slot(RECIPE_BACKGROUND.get()):
+                    latency("llm_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
+                    logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter()-started)*1000)
+                    phase, phase_started = "model", perf_counter()
+                    result = await self._recipe_reasoner.reason(request)
+                    outcome = "success"
+                    return result
         except TimeoutError as exc:
             outcome = "timeout"
             logger.warning("recipe_ai_budget_exceeded stage=%s budget_seconds=%.1f", request.stage, budget)

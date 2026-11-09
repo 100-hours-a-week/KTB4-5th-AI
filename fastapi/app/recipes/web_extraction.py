@@ -85,6 +85,17 @@ def quoted_ingredient(name: str, quote: str, number: int) -> Ingredient | None:
     return Ingredient(ingredientNo=number, name=name, amountText=quote)
 
 
+# 화면용 요리 이름만 정리한다. 원문 검증은 원래 제목으로 하며 새 단어는 만들지 않는다.
+# 예: "고추장과 된장으로 '마파두부 만드는 법'" → "고추장과 된장으로 마파두부", "두부조림 황금레시피 | 블로그" → "두부조림"
+def display_title(title: str) -> str:
+    value = re.split(r"\s+[|｜:]\s+|\s+-\s+", title.strip())[0]
+    value = re.sub(r"^\s*[\[【(][^\]】)]{1,12}[\]】)]\s*", "", value)
+    value = re.sub(r"[\"'‘’“”「」『』]", "", value)
+    value = re.sub(r"\s*(?:황금\s*)?(?:레시피|만드는\s*법|만드는\s*방법|만들기|요리법)\s*$", "", value)
+    value = re.sub(r"\s+", " ", value).strip(" ,.!~")
+    return value if len(value) >= 2 else title.strip()
+
+
 # 모델 출력은 원문 인용의 부분 문자열과 순서를 모두 검증한다. 요약/새 수치/중복/혼합 배합은 거부한다.
 def validate_extraction(result: ExtractedRecipe, text: str, title: str) -> dict | None:
     if result.status != "EXTRACTED" or mixed_batch(text) or result.title not in text and result.title != title:
@@ -130,4 +141,4 @@ def validate_extraction(result: ExtractedRecipe, text: str, title: str) -> dict 
     paragraphs = numbered_instructions(text.splitlines())
     if paragraphs and any(not any(paragraph in step for step in result.steps) for paragraph in paragraphs):
         return None
-    return {"name": result.title, "ingredients": ingredients, "steps": result.steps}
+    return {"name": display_title(result.title), "ingredients": ingredients, "steps": result.steps}

@@ -23,14 +23,24 @@ CUISINE_TAGS = {"한식": "KOREAN", "양식": "WESTERN", "중식": "CHINESE", "�
 DIFFICULTY_TAGS = {"쉬움": "EASY", "중간": "MEDIUM", "어려움": "HARD"}
 PURPOSE_TAGS = {"간식": "SNACK", "디저트": "DESSERT", "한끼": "MEAL", "간편한식사": "QUICK_MEAL"}
 TEXTURE_TAGS = {"바삭": "CRISPY", "바삭한": "CRISPY", "쫄깃": "CHEWY", "쫄깃한": "CHEWY", "부드러운": "SOFT"}
+# 요리 형태 / 온도 / 무게감은 저장된 분류(dishForm / servingTemperature / heaviness)로 판정한다.
+# 이전에는 이 표가 없어 "국물요리"를 맛 태그처럼 조리문 인용으로만 판정했고 국물 요리가 아닌 후보가 앞에 섰다(dev 실측).
+DISH_FORM_TAGS = {"국물요리": "SOUP_STEW", "국물": "SOUP_STEW", "국": "SOUP_STEW", "찌개": "SOUP_STEW", "탕": "SOUP_STEW", "국찌개": "SOUP_STEW",
+                  "밥요리": "RICE", "밥": "RICE", "덮밥": "RICE", "면요리": "NOODLE", "면": "NOODLE", "국수": "NOODLE",
+                  "반찬": "SIDE_DISH", "메인요리": "MAIN_DISH", "샐러드": "SALAD", "베이킹": "BAKED", "음료": "DRINK"}
+TEMPERATURE_TAGS = {"따뜻한": "HOT", "따뜻한요리": "HOT", "뜨끈한": "HOT", "시원한": "COLD", "차가운": "COLD", "시원한요리": "COLD"}
+HEAVINESS_TAGS = {"가벼운": "LIGHT", "가벼운요리": "LIGHT", "가볍게": "LIGHT"}
 LABELS = {"KOREAN": "한식", "WESTERN": "양식", "CHINESE": "중식", "JAPANESE": "일식", "EASY": "쉬움", "MEDIUM": "중간", "HARD": "어려움",
-          "SNACK": "간식", "DESSERT": "디저트", "MEAL": "한끼", "QUICK_MEAL": "간편한 식사", "CRISPY": "바삭", "CHEWY": "쫄깃", "SOFT": "부드러움"}
+          "SNACK": "간식", "DESSERT": "디저트", "MEAL": "한끼", "QUICK_MEAL": "간편한 식사", "CRISPY": "바삭", "CHEWY": "쫄깃", "SOFT": "부드러움",
+          "SOUP_STEW": "국물 요리", "RICE": "밥 요리", "NOODLE": "면 요리", "SIDE_DISH": "반찬", "MAIN_DISH": "메인 요리", "SALAD": "샐러드",
+          "BAKED": "베이킹", "DRINK": "음료", "HOT": "따뜻한 요리", "COLD": "시원한 요리", "LIGHT": "가벼운 요리"}
+
 
 
 # 맛 외 태그인지 판별한다. 이 태그는 요청 시점 인용문으로 검증할 수 없어 저장된 속성으로만 일치를 판단한다.
 def attribute_tag(tag: str) -> bool:
     key = canonical(tag)
-    return any(key in table for table in (CUISINE_TAGS, DIFFICULTY_TAGS, PURPOSE_TAGS, TEXTURE_TAGS))
+    return any(key in table for table in (CUISINE_TAGS, DIFFICULTY_TAGS, PURPOSE_TAGS, TEXTURE_TAGS, DISH_FORM_TAGS, TEMPERATURE_TAGS, HEAVINESS_TAGS))
 
 
 # 원천 / 모델 / 분류 버전이 같으면 같은 키다. 사용자 / 재고 / 날씨는 포함하지 않는다.
@@ -105,11 +115,10 @@ def attribute_decisions(attributes: RecipeAttributes | dict, tags: list[str]) ->
     result = {}
     for tag in tags:
         key = canonical(tag)
-        if key in CUISINE_TAGS:
-            wanted, actual = CUISINE_TAGS[key], value.cuisine
-            status = "UNKNOWN" if actual == "UNKNOWN" else "MATCHED" if actual == wanted else "NOT_MATCHED"
-        elif key in DIFFICULTY_TAGS:
-            wanted, actual = DIFFICULTY_TAGS[key], value.difficulty
+        single = next(((table[key], getattr(value, field)) for table, field in ((CUISINE_TAGS, "cuisine"), (DIFFICULTY_TAGS, "difficulty"),
+                       (DISH_FORM_TAGS, "dishForm"), (TEMPERATURE_TAGS, "servingTemperature"), (HEAVINESS_TAGS, "heaviness")) if key in table), None)
+        if single is not None:
+            wanted, actual = single
             status = "UNKNOWN" if actual == "UNKNOWN" else "MATCHED" if actual == wanted else "NOT_MATCHED"
         elif key in PURPOSE_TAGS:
             wanted = PURPOSE_TAGS[key]
