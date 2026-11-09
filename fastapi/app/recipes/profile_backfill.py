@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 
+from app.adapters.remote_inference import BACKGROUND_PRIORITY
 from app.config import Settings
 from app.recipes.ai import RecipeReasoner
 from app.recipes.repository import RecipeRepository
@@ -13,6 +14,8 @@ from app.recipes.taste_repository import TasteProfileRepository
 
 # 원천 ID로 페이지를 진행한다. 기존 평가를 재사용하고 오류는 집계하며 운영 추천 큐는 변경하지 않는다.
 async def backfill(limit: int, after_id: int, timeout: float, source: str | None = None) -> dict:
+    # 운영 중 실행해도 사용자 추천 요청이 먼저 GPU를 쓰게 한다.
+    BACKGROUND_PRIORITY.set(True)
     settings = Settings()
     repository, reasoner = RecipeRepository(settings), RecipeReasoner(settings)
     store = TasteProfileRepository(repository)

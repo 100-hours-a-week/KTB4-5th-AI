@@ -33,6 +33,7 @@ from app.schemas import (
     RemoteOcrLine,
 )
 from gpu_worker.image_downloader import SecureImageDownloader
+from gpu_worker.priority import RECIPE_BACKGROUND, PriorityGate
 from gpu_worker.recipe_contract import RecipeAiRequest, RecipeAiResponse
 from gpu_worker.recipe_reasoner import RecipeTextReasoner
 
@@ -45,7 +46,7 @@ class GpuInferenceEngine:
         self._settings = settings
         self._inference_semaphore = asyncio.Semaphore(settings.worker_max_concurrency)
         self._ocr_semaphore = asyncio.Semaphore(settings.worker_ocr_max_concurrency)
-        self._llm_semaphore = asyncio.Semaphore(settings.worker_llm_max_concurrency)
+        self._llm_semaphore = PriorityGate(settings.worker_llm_max_concurrency)
         self._recipe_reasoner = RecipeTextReasoner(settings)
         self._downloader = SecureImageDownloader(settings)
         self._ocr = PaddleTextExtractorPool(settings)
@@ -77,7 +78,7 @@ class GpuInferenceEngine:
                 async with self._inference_semaphore:
                     latency("worker_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
                     phase, phase_started = "llm_slot_wait", perf_counter()
-                    async with self._llm_semaphore:
+                    async with self._llm_semaphore.slot(RECIPE_BACKGROUND.get()):
                         latency("llm_slot_acquired", stage=request.stage, wait_ms=round((perf_counter()-phase_started)*1000, 3))
                         logger.info("recipe_ai_slot_acquired stage=%s queue_ms=%.1f", request.stage, (perf_counter()-started)*1000)
                         phase, phase_started = "model", perf_counter()
@@ -148,7 +149,7 @@ class GpuInferenceEngine:
             ocr_hints = self._product_ocr_hints(safe_lines, detected.boxes, image.width, image.height, document.width, document.height)
             ocr_hints = self._append_detection_labels(ocr_hints, detected.labels)
             llm_wait_started = perf_counter()
-            async with self._llm_semaphore:
+            async with self._llm_semaphore.slot():
                 llm_queue_wait_ms = (perf_counter() - llm_wait_started) * 1000
                 llm_started = perf_counter()
                 product_lines, product_candidates, diagnostics = await self._classify_detected_products(detected.crops, [], ocr_hints)
@@ -161,7 +162,7 @@ class GpuInferenceEngine:
             safe_lines = sanitize_lines(document.lines)
             if self._food_classifier is not None and effective_input_type != "OTHER":
                 llm_wait_started = perf_counter()
-                async with self._llm_semaphore:
+                async with self._llm_semaphore.slot():
                     llm_queue_wait_ms = (perf_counter() - llm_wait_started) * 1000
                     stage_started = perf_counter()
                     if effective_input_type == "RECEIPT":

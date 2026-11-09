@@ -14,6 +14,7 @@ from app.logging.recipe_trace import recipe_trace
 from app.monitoring.metrics import WORKER_INFLIGHT, WORKER_REQUESTS, observe_diagnostics, render_metrics
 from app.schemas import RemoteInferenceRequest, RemoteInferenceResponse
 from gpu_worker.engine import GpuInferenceEngine
+from gpu_worker.priority import RECIPE_BACKGROUND
 from gpu_worker.recipe_contract import RecipeAiRequest, RecipeAiResponse
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,13 @@ def create_worker_app(settings: Settings | None = None, engine: WorkerEngine | N
 
     @application.post("/internal/v1/recipes/reason", response_model=RecipeAiResponse, dependencies=[Depends(authenticate_worker)])
     async def reason_recipe(payload: RecipeAiRequest, request: Request, current_engine: Annotated[WorkerEngine, Depends(get_engine)]) -> RecipeAiResponse:
-        with recipe_trace(request.headers.get("X-Request-ID"), request.headers.get("X-Recipe-Call-ID")):
-            return await current_engine.reason_recipe(payload)
+        # 백그라운드 표시 호출(웹 레시피 추출 / 맛 평가)은 사용자 요청이 기다리면 LLM 슬롯을 양보한다.
+        token = RECIPE_BACKGROUND.set(request.headers.get("X-Recipe-Priority", "").lower() == "background")
+        try:
+            with recipe_trace(request.headers.get("X-Request-ID"), request.headers.get("X-Recipe-Call-ID")):
+                return await current_engine.reason_recipe(payload)
+        finally:
+            RECIPE_BACKGROUND.reset(token)
 
     @application.get("/metrics", include_in_schema=False, dependencies=[Depends(authenticate_worker)])
     async def metrics() -> Response:

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from contextvars import ContextVar
 from pathlib import PurePosixPath
 from urllib.parse import quote, urljoin
 from uuid import uuid4
@@ -22,6 +23,8 @@ from app.logging.recipe_trace import CALL_ID, TRACE_ID, latency, recipe_trace
 from app.schemas import RemoteInferenceResponse
 
 logger = logging.getLogger(__name__)
+# 백그라운드 작업(지연 웹 보충 / 맛 평가 / backfill)의 Worker 호출에 표시한다. Worker는 사용자 요청이 기다리면 LLM 슬롯을 양보한다.
+BACKGROUND_PRIORITY: ContextVar[bool] = ContextVar("recipe_background_priority", default=False)
 
 
 class RemoteInferenceClient:
@@ -219,6 +222,8 @@ class RemoteInferenceClient:
                 phase, phase_started = "worker_http", time.monotonic()
                 headers = {"X-Worker-API-Key": self._settings.remote_inference_api_key or "",
                            "X-Request-ID": TRACE_ID.get(), "X-Recipe-Call-ID": CALL_ID.get()}
+                if BACKGROUND_PRIORITY.get():
+                    headers["X-Recipe-Priority"] = "background"
                 response = await self._client.post(f"{worker_url}/internal/v1/recipes/reason", json=outgoing, headers=headers, timeout=max(0.1, remaining))
                 status = response.status_code
                 response.raise_for_status()

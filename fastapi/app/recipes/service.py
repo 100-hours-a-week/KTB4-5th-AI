@@ -8,6 +8,7 @@ from time import monotonic
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from app.adapters.remote_inference import BACKGROUND_PRIORITY
 from app.config import Settings
 from app.errors import DependencyUnavailable
 from app.logging.recipe_trace import recipe_trace
@@ -98,6 +99,7 @@ class RecipeService:
 
     # 직전 요청 뒤 일정 시간 한가할 때만 하나씩 평가한다. 저장 테이블이 없으면 1시간 동안 멈춘다.
     async def _run_profiles(self) -> None:
+        BACKGROUND_PRIORITY.set(True)
         while self._profile_queue:
             idle = monotonic() - self._last_request_at
             if self._active_requests or self._deferred_supply or idle < self.settings.recipe_background_profile_idle_seconds:
@@ -143,6 +145,7 @@ class RecipeService:
 
     # 결과는 다음 요청의 후보로 쓴다. DB 저장이 승인되지 않은 웹 원천도 제한 시간 동안 메모리에서 재사용한다.
     async def _run_deferred_supply(self, focus: list[str], companions: list[str], tags: list[str], allow_food_safety: bool, usable: Callable[[Recipe], bool]) -> None:
+        BACKGROUND_PRIORITY.set(True)
         try:
             supplied = await RecipeSupply(self.settings, self.repository, self.provider, self.web_provider).replenish(
                 focus, companions, tags, monotonic() + self.settings.recipe_supply_background_timeout_seconds, allow_food_safety, usable=usable)
