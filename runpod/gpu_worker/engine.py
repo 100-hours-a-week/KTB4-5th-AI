@@ -49,12 +49,24 @@ ENGLISH_FOOD_NAMES = {
     "zucchini": "애호박", "eggplant": "가지", "radish": "무", "corn": "옥수수", "apple": "사과", "orange": "오렌지",
     "banana": "바나나", "lemon": "레몬", "strawberry": "딸기", "grape": "포도", "milk": "우유", "tofu": "두부",
     "cheese": "치즈", "yogurt": "요거트", "butter": "버터", "pork": "돼지고기", "beef": "소고기", "chicken": "닭고기",
-    "fish": "생선", "kimchi": "김치",
+    "fish": "생선", "kimchi": "김치", "sausage": "소시지", "sausages": "소시지", "hot dog": "소시지", "ham": "햄",
+    "bacon": "베이컨", "fish cake": "어묵", "bread": "식빵", "juice": "주스",
 }
 
 
 def korean_food_name(name: str) -> str:
     return ENGLISH_FOOD_NAMES.get(" ".join(name.lower().split()), name.strip())
+
+
+# 냉장고 사진에서도 OCR이 반찬통·선반의 무늬를 "L" 같은 한두 글자로 읽는다(운영 실측). 한글 2자 이상이나
+# 영문·숫자 3자 이상이 이어진 조각이 있어야 포장 글자로 보고, 그보다 짧은 잡음은 글자가 없는 것으로 본다.
+def has_package_text(ocr_hint: str) -> bool:
+    for segment in ocr_hint.split(" / "):
+        hangul = sum("가" <= char <= "힣" for char in segment)
+        alnum_run = max((len(token) for token in "".join(char if char.isascii() and char.isalnum() else " " for char in segment).split()), default=0)
+        if hangul >= 2 or alnum_run >= 3:
+            return True
+    return False
 
 
 class GpuInferenceEngine:
@@ -311,9 +323,9 @@ class GpuInferenceEngine:
         results = await asyncio.gather(*(classify(crop, hint) for crop, hint in zip(crops, hints, strict=True)))
         # 사진 전체가 crop 하나로 온 경우다. e2b 모델은 냉장고 칸 전체를 한 번에 보면 2개 안팎만 찾으므로(dev 실측:
         # 5종 중 2종), 여러 재료가 보이거나 포장 글자가 없는 실물이면 겹친 2×2 칸을 따로 보고 합친다.
-        # 포장 글자가 있는 단일 상품 사진은 기존처럼 한 번만 호출한다.
+        # 포장 글자가 있는 단일 상품 사진은 기존처럼 한 번만 호출한다. OCR 한두 글자 잡음은 포장 글자로 보지 않는다.
         whole_image = len(crops) == 1
-        tiled = whole_image and self._settings.worker_product_tile_fallback_enabled and (len(results[0][1]) >= 2 or not hints[0].strip())
+        tiled = whole_image and self._settings.worker_product_tile_fallback_enabled and (len(results[0][1]) >= 2 or not has_package_text(hints[0]))
         tiles = self._overlapping_tiles(crops[0]) if tiled else ()
         tiled = bool(tiles)
         if tiled:
@@ -331,11 +343,12 @@ class GpuInferenceEngine:
             # YOLO가 상품을 2개 이상 나누지 못하면 사진 전체가 crop 하나로 온다. 이때는 냉장고 칸처럼
             # 한 장에 여러 재료가 있을 수 있으므로 모델이 찾은 항목을 모두 남긴다. 분리된 crop은 상품 하나다.
             for candidate in candidates if whole_image else candidates[:1]:
-                normalized_name = self._prefer_ocr_product_name(candidate.normalized_name, hints[result_index] if result_index < len(hints) else "")
+                # 영어 일반명(cucumber·sausage 등)은 crop 종류와 관계없이 한글 재고명으로 바꾼다. 그래야
+                # 보관기간 규칙(소시지·오이 등 한글 이름)과 맞아 소비기한 예상 범위가 채워진다.
+                normalized_name = korean_food_name(self._prefer_ocr_product_name(candidate.normalized_name, hints[result_index] if result_index < len(hints) else ""))
                 if whole_image:
                     # 사진 전체·칸 결과는 같은 재료가 겹쳐 나오므로 한글명 기준으로 한 번만 남긴다.
                     # 따로 잘린 YOLO crop은 같은 상품 여러 개일 수 있어 합치지 않는다.
-                    normalized_name = korean_food_name(normalized_name)
                     if is_non_food(normalized_name) or any(item.normalized_name == normalized_name for item in selected):
                         continue
                 line_no = max((line.line_no for line in output_lines), default=0) + 1
