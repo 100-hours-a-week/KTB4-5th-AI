@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import io
 import logging
@@ -38,6 +39,22 @@ from gpu_worker.recipe_contract import RecipeAiRequest, RecipeAiResponse
 from gpu_worker.recipe_reasoner import RecipeTextReasoner
 
 logger = logging.getLogger(__name__)
+
+# 비전 모델이 영어 일반명으로 답한 생물 재료를 한글 재고명으로 맞춘다. 상품명·모르는 이름은 그대로 둔다.
+ENGLISH_FOOD_NAMES = {
+    "cucumber": "오이", "cabbage": "양배추", "lettuce": "상추", "tomato": "토마토", "egg": "계란", "eggs": "계란",
+    "leafy greens": "잎채소", "leafy green vegetable": "잎채소", "leafy green vegetables": "잎채소", "carrot": "당근",
+    "onion": "양파", "green onion": "대파", "scallion": "대파", "potato": "감자", "sweet potato": "고구마",
+    "garlic": "마늘", "broccoli": "브로콜리", "spinach": "시금치", "bell pepper": "파프리카", "mushroom": "버섯",
+    "zucchini": "애호박", "eggplant": "가지", "radish": "무", "corn": "옥수수", "apple": "사과", "orange": "오렌지",
+    "banana": "바나나", "lemon": "레몬", "strawberry": "딸기", "grape": "포도", "milk": "우유", "tofu": "두부",
+    "cheese": "치즈", "yogurt": "요거트", "butter": "버터", "pork": "돼지고기", "beef": "소고기", "chicken": "닭고기",
+    "fish": "생선", "kimchi": "김치",
+}
+
+
+def korean_food_name(name: str) -> str:
+    return ENGLISH_FOOD_NAMES.get(" ".join(name.lower().split()), name.strip())
 
 
 class GpuInferenceEngine:
@@ -286,8 +303,21 @@ class GpuInferenceEngine:
             async with crop_semaphore:
                 return await self._food_classifier.classify_product_image(crop, [], ocr_hint)
 
+        async def classify_tile(tile: LoadedImage):
+            async with crop_semaphore:
+                return await self._food_classifier.classify_product_image(tile, [], "")
+
         hints = ocr_hints if len(ocr_hints) == len(crops) else tuple("" for _ in crops)
         results = await asyncio.gather(*(classify(crop, hint) for crop, hint in zip(crops, hints, strict=True)))
+        # 사진 전체가 crop 하나로 온 경우다. e2b 모델은 냉장고 칸 전체를 한 번에 보면 2개 안팎만 찾으므로(dev 실측:
+        # 5종 중 2종), 여러 재료가 보이거나 포장 글자가 없는 실물이면 겹친 2×2 칸을 따로 보고 합친다.
+        # 포장 글자가 있는 단일 상품 사진은 기존처럼 한 번만 호출한다.
+        whole_image = len(crops) == 1
+        tiled = whole_image and self._settings.worker_product_tile_fallback_enabled and (len(results[0][1]) >= 2 or not hints[0].strip())
+        tiles = self._overlapping_tiles(crops[0]) if tiled else ()
+        tiled = bool(tiles)
+        if tiled:
+            results = [results[0], *await asyncio.gather(*(classify_tile(tile) for tile in tiles))]
         output_lines = list(base_lines)
         selected: list[ClassifiedFoodLine] = []
         diagnostics = PipelineDiagnostics()
@@ -300,9 +330,15 @@ class GpuInferenceEngine:
             diagnostics.warnings.extend(current.warnings)
             # YOLO가 상품을 2개 이상 나누지 못하면 사진 전체가 crop 하나로 온다. 이때는 냉장고 칸처럼
             # 한 장에 여러 재료가 있을 수 있으므로 모델이 찾은 항목을 모두 남긴다. 분리된 crop은 상품 하나다.
-            for candidate in candidates if len(crops) == 1 else candidates[:1]:
-                line_no = max((line.line_no for line in output_lines), default=0) + 1
+            for candidate in candidates if whole_image else candidates[:1]:
                 normalized_name = self._prefer_ocr_product_name(candidate.normalized_name, hints[result_index] if result_index < len(hints) else "")
+                if whole_image:
+                    # 사진 전체·칸 결과는 같은 재료가 겹쳐 나오므로 한글명 기준으로 한 번만 남긴다.
+                    # 따로 잘린 YOLO crop은 같은 상품 여러 개일 수 있어 합치지 않는다.
+                    normalized_name = korean_food_name(normalized_name)
+                    if is_non_food(normalized_name) or any(item.normalized_name == normalized_name for item in selected):
+                        continue
+                line_no = max((line.line_no for line in output_lines), default=0) + 1
                 category = known_food_category(normalized_name) or candidate.category
                 output_lines.append(OcrLine(line_no=line_no, text=normalized_name, confidence=candidate.confidence))
                 selected.append(
@@ -314,7 +350,30 @@ class GpuInferenceEngine:
                         reason=candidate.reason if candidate.reason == "ocr_keyword_rule" else "yolo_crop_vision_model",
                     )
                 )
+        if tiled:
+            diagnostics.warnings.append("product_tile_fallback")
         return output_lines, selected, diagnostics
+
+    @staticmethod
+    # 사진을 가로·세로 60%씩 겹친 4칸으로 나눈다. 칸 경계에 걸친 재료도 한 칸에는 온전히 들어가게 한다.
+    def _overlapping_tiles(image: LoadedImage) -> tuple[LoadedImage, ...]:
+        try:
+            with Image.open(io.BytesIO(image.content)) as source:
+                original = ImageOps.exif_transpose(source).convert("RGB")
+        except (OSError, ValueError):
+            # 디코딩할 수 없으면 칸 분석을 건너뛰고 사진 전체 결과만 쓴다.
+            logger.warning("product_tile_fallback.skipped reason=decode_failed")
+            return ()
+        width, height = original.size
+        tiles = []
+        for left, right in ((0.0, 0.6), (0.4, 1.0)):
+            for top, bottom in ((0.0, 0.6), (0.4, 1.0)):
+                crop = original.crop((round(width * left), round(height * top), round(width * right), round(height * bottom)))
+                buffer = io.BytesIO()
+                crop.save(buffer, format="JPEG", quality=92)
+                content = buffer.getvalue()
+                tiles.append(LoadedImage(content, "image/jpeg", crop.width, crop.height, hashlib.sha256(content).hexdigest()))
+        return tuple(tiles)
 
     @staticmethod
     # 포장 홍보·원재료·제조사 설명은 구체적인 상품명 OCR 힌트로 사용하지 않는다.

@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     worker_product_detector_image_size: int = Field(default=1280, ge=320, le=1920)
     worker_product_detector_max_detections: int = Field(default=24, ge=1, le=64)
     worker_product_crop_concurrency: int = Field(default=2, ge=1, le=4)
+    # YOLO가 상품을 나누지 못한 사진에서 여러 재료가 보이거나 포장 글자가 없으면 겹친 2×2 칸으로 다시 본다.
+    worker_product_tile_fallback_enabled: bool = True
     # 저해상도 영수증은 한글 초성이 사라지는 경우가 있어 OCR 전에 긴 변만 확대한다.
     # 원본이 충분히 크면 재인코딩하지 않아 일반 요청 비용은 늘리지 않는다.
     worker_receipt_ocr_min_long_edge: int = Field(default=1280, ge=0, le=2400)
