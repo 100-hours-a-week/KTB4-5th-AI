@@ -40,7 +40,7 @@
 | `017_shelf_life_rules_leafy_greens_broccoli.sql` | (INSERT만) | 깻잎·브로콜리 냉장 보관 참고 범위(USDA ARS Handbook 66) | 시드 데이터 |
 | `018_feedback_learning.sql` | `receipt_item_feedback`, `learned_corrections` | 사용자 피드백과 보정 지식 저장 테이블. 상품 카탈로그 조회 쿼리가 `learned_corrections`를 읽으므로 **앱 배포 전에 적용** | 스키마 변경 |
 | `019_personal_feedback_learning.sql` | `learned_corrections` 컬럼·인덱스 변경 | 한 번 수정한 값은 해당 냉장고에 즉시 적용. 전역 컬럼은 이력 호환을 위해 보존하되 현재 사용하지 않음 | 스키마 변경 |
-| `025_shelf_life_rules_mfds_processed.sql` | (INSERT·UPDATE) | 식약처 참고값(2022-12-21) 7개 유형(과자·과채음료·생면·묵류·베이컨류·간편조리세트·전란액)을 일반명 17건으로 추가, USDA 베이컨 1건 비활성화 | 시드 데이터 |
+| `025_shelf_life_rules_mfds_processed.sql` | (INSERT·UPDATE) | 식약처 참고값(2022-12-21) 7개 유형(과자·과채음료·생면·묵류·베이컨류·간편조리세트·전란액)을 일반명 15건으로 추가, USDA 베이컨 1건 비활성화(dev 적용 2026-11-10: 활성 56→70건) | 시드 데이터 |
 
 아래 본문의 실험 기록에 나오는 `PROCESSED` 등 이전 카테고리 코드는 016 적용 전 기록이다.
 
