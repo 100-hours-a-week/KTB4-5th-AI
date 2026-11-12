@@ -1,9 +1,14 @@
+import asyncio
+import logging
 from typing import Any
 
 from app.adapters._cache import BoundedAsyncCache, LazyPool
+from app.adapters.product_shelf_life import FoodSafetyProductShelfLife, ProductShelfLifeUnavailable
 from app.config import Settings
 from app.domain.models import ShelfLifeEstimate
 from app.errors import DependencyUnavailable
+
+logger = logging.getLogger(__name__)
 
 # fresh_only 규칙(양파·감자·돼지고기 같은 신선식품, 마이그레이션 012)은 상품이 채소·과일·육류·수산으로
 # 분류됐을 때만 쓴다 — 이름에 "감자"가 들어간 과자(감자깡)나 "사과"가 들어간 주스에 신선식품 보관기간이
@@ -29,19 +34,49 @@ _LOOKUP_QUERY = """
 
 class PostgresShelfLifeLookup:
     # DB 접속 정보가 담긴 설정을 받아 조회기를 구성한다. 연결 pool은 최초 조회 시 지연 생성한다.
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, product_lookup: FoodSafetyProductShelfLife | None = None) -> None:
         self._settings = settings
         self._pool = LazyPool(self._create_pool)
         self._cache: BoundedAsyncCache[ShelfLifeEstimate | None] = BoundedAsyncCache(settings.reference_cache_max_size)
+        self._product_lookup = product_lookup or FoodSafetyProductShelfLife(settings, self._pool.get)
 
     # 정규화 식재료명과 보관 방식으로 검수된 보관기간 규칙을 조회해 반환한다.
     # normalized_ingredient_name은 정확히 일치하지 않아도, shelf_life_rules에 저장된
     # 일반 식재료명(예: "우유")이 조회 이름(예: "서울우유")에 부분 문자열로 포함되면 매칭한다.
     # 여러 규칙이 동시에 포함되면 더 긴(더 구체적인) 이름을 우선한다.
     # 결과(없음 포함)는 프로세스 메모리에 캐싱해 동일 식재료·보관방식 재조회 시 DB를 다시 안 부른다.
+    #
+    # 가공식품(fresh_item=False)은 먼저 제조사 신고 소비기한(품목제조보고)을 찾는다. 유형 규칙보다 제품에
+    # 가깝기 때문이다. 신고값은 제조일 기준이라 뒤 날짜만 정하고, 앞 날짜는 같은 상품의 유형 규칙 비율
+    # (예: 과자 36/81)로 줄인다. 유형 규칙이 없으면 앞 날짜는 기준일 당일이다.
     async def find(self, normalized_ingredient_name: str, storage_type: str, fresh_item: bool = True) -> ShelfLifeEstimate | None:
         cache_key = f"{normalized_ingredient_name}\x1f{storage_type}\x1f{fresh_item}"
-        return await self._cache.get_or_load(cache_key, lambda: self._query(normalized_ingredient_name, storage_type, fresh_item))
+        rule = await self._cache.get_or_load(cache_key, lambda: self._query(normalized_ingredient_name, storage_type, fresh_item))
+        # 신선식품으로 분류된 상품(크랩마스터=수산, 소시지=육류)은 유형 규칙이 아예 없을 때만, 이름이 정확히
+        # 맞는 신고값을 쓴다. 양파처럼 규칙이 있는 신선식품에 같은 이름의 가공품 신고값이 붙지 않게 한다.
+        if not self._product_lookup.enabled or (fresh_item and rule is not None):
+            return rule
+        try:
+            product = await self._product_lookup.find(normalized_ingredient_name)
+        except ProductShelfLifeUnavailable as exc:
+            logger.warning("product_shelf_life.unavailable reason=%s", exc)
+            return rule
+        if product.duration_days is None or (fresh_item and product.match_kind != "EXACT"):
+            return rule
+        days = product.duration_days
+        min_days = round(days * rule.duration_min_days / rule.duration_max_days) if rule and rule.duration_max_days > 0 else 0
+        return ShelfLifeEstimate(
+            rule_id=0,
+            duration_min_days=min(min_days, days),
+            duration_max_days=days,
+            source_name=f"식품안전나라 품목제조보고(제조사 신고 소비기한 {product.raw_text})",
+            source_url="https://www.foodsafetykorea.go.kr/api/openApiInfo.do?svc_no=I1250",
+            evidence_id=f"food-safety-i1250:{product.matched_product_name}",
+            assumption=(
+                f"제조사 신고 소비기한은 제조일 기준이며 제조일을 알 수 없어 {product.matched_product_name}"
+                f"({product.item_type}) 신고값 {days}일을 상한으로 사용"
+            ),
+        )
 
     async def _query(self, normalized_ingredient_name: str, storage_type: str, fresh_item: bool) -> ShelfLifeEstimate | None:
         try:
@@ -62,7 +97,18 @@ class PostgresShelfLifeLookup:
         )
 
     # 열려 있는 연결 pool이 있으면 닫는다.
+    # 분석 한 건의 상품명을 미리 동시에 조회해 캐시를 채운다. 항목별 find()가 순서대로 API를 기다리지 않게 한다.
+    async def prefetch(self, names: list[str]) -> None:
+        if not self._product_lookup.enabled:
+            return
+        unique = list(dict.fromkeys(name for name in names if name))
+        results = await asyncio.gather(*(self._product_lookup.find(name) for name in unique), return_exceptions=True)
+        failed = sum(isinstance(result, Exception) for result in results)
+        if failed:
+            logger.warning("product_shelf_life.prefetch_failed count=%s total=%s", failed, len(unique))
+
     async def close(self) -> None:
+        await self._product_lookup.close()
         await self._pool.close()
 
     # DATABASE_URL로 asyncpg 연결 pool을 새로 생성해 반환한다.

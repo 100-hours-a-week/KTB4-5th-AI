@@ -44,6 +44,9 @@ class ShelfLifeEstimate:
     duration_max_days: int
     source_name: str
     source_url: str
+    # 규칙이 아닌 제품별 신고값(품목제조보고)을 쓴 경우의 근거 ID. None이면 shelf-life-rule-{rule_id}.
+    evidence_id: str | None = None
+    assumption: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

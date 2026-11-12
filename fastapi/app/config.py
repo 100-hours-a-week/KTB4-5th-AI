@@ -106,6 +106,12 @@ class Settings(BaseSettings):
         return sorted(result)
     database_pool_max_size: int = Field(default=5, ge=1, le=50)
     reference_cache_max_size: int = Field(default=2000, ge=1, le=100_000)
+    # 날짜가 안 보이는 가공식품에 제조사 신고 소비기한(식품안전나라 I1250)을 조회한다.
+    # 키는 레시피 수집과 같은 식품안전나라 키(RECIPE_FOOD_SAFETY_API_KEY)를 쓰며, I1250 활용신청이 필요하다.
+    product_shelf_life_lookup_enabled: bool = True
+    # 실측 응답 0.2~4.7초(2026-11-12). 분석 한 건의 상품명은 동시에 조회한다.
+    product_shelf_life_timeout_seconds: float = Field(default=6.0, ge=0.5, le=15)
+    product_shelf_life_refresh_days: int = Field(default=30, ge=1, le=365)
     # 여러 FastAPI 프로세스 중 한 곳에서 개인 보정이 갱신돼도 다른 프로세스가 이 시간 안에
     # PostgreSQL을 다시 조회하도록 상품 카탈로그 캐시에 만료 시간을 둔다.
     product_catalog_cache_ttl_seconds: float = Field(default=60.0, ge=1, le=3600)

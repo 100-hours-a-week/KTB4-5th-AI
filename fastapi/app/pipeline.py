@@ -349,6 +349,7 @@ class ReceiptAnalysisPipeline:
             purchase_date = today
             estimation_basis = f"영수증 구매일을 확인할 수 없어 분석일 {today.isoformat()}을 임시 기준일로 사용함"
             estimate_confidence = 0.35
+        await self._prefetch_shelf_life(selected)
         items: list[ReceiptItem] = []
         for index, selected_line in enumerate(selected, start=1):
             original = lines_by_number.get(selected_line.line_no)
@@ -492,6 +493,7 @@ class ReceiptAnalysisPipeline:
         expiration_text = " ".join(line.text for line in safe_lines) if len(selected) == 1 else None
         measurement_text = expiration_text
         analysis_date = _local_today(request.timezone)
+        await self._prefetch_shelf_life(selected)
         items: list[ReceiptItem] = []
         for index, selected_line in enumerate(selected, start=1):
             original = lines_by_number.get(selected_line.line_no)
@@ -743,12 +745,24 @@ class ReceiptAnalysisPipeline:
             "assumptions": [
                 estimation_basis or f"영수증에서 확인한 구매일 {purchase_date.isoformat()}",
                 f"보관 가능 기간 {estimate.duration_min_days}~{estimate.duration_max_days}일 적용",
+                *([estimate.assumption] if estimate.assumption else []),
                 f"보관 방식: {storage_type}",
                 "포장 개봉 여부 확인 안 됨",
             ],
-            "evidenceIds": [f"shelf-life-rule-{estimate.rule_id}"],
+            "evidenceIds": [estimate.evidence_id or f"shelf-life-rule-{estimate.rule_id}"],
             "source_name": estimate.source_name,
         }
+
+    # 가공식품 상품명의 제조사 신고 소비기한을 미리 동시에 조회한다. 실패해도 분석은 계속한다.
+    async def _prefetch_shelf_life(self, selected: list[ClassifiedFoodLine]) -> None:
+        prefetch = getattr(self._shelf_life_lookup, "prefetch", None)
+        if prefetch is None:
+            return
+        names = [normalize_product_name(line.normalized_name) for line in selected if line.category not in _FRESH_CATEGORIES]
+        try:
+            await prefetch(names)
+        except Exception:
+            logger.exception("product_shelf_life.prefetch_error count=%s", len(names))
 
     # OCR 상품행 텍스트로 상품 카탈로그를 조회해 일치하는 항목 또는 None을 반환한다.
     # 조회가 실패해도 전체 분석을 실패시키지 않고 Gemma로 넘기도록 None을 반환한다.

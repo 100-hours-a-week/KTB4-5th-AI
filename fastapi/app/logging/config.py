@@ -83,6 +83,9 @@ def configure_logging(settings: Settings) -> Path:
 
     root = logging.getLogger()
     root.setLevel(settings.log_level)
+    # httpx는 INFO로 요청 URL 전체를 남긴다. 식품안전나라 API는 인증키가 URL 경로에 들어가므로 끈다.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     if _queue_listener is not None:
         return log_path
 
