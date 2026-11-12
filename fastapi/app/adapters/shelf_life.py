@@ -10,6 +10,10 @@ from app.errors import DependencyUnavailable
 
 logger = logging.getLogger(__name__)
 
+# 판매 허용 기한 마지막 날에 사도 남는 기간의 비율 (소비기한 − 평균 유통기한) / 소비기한.
+# 식약처 참고값 17개 유형(010·025 원표)의 중앙값이다. 범위는 베이컨류 0.11 ~ 과채음료 0.45.
+_DEFAULT_REMAINING_RATIO = 0.31
+
 # fresh_only 규칙(양파·감자·돼지고기 같은 신선식품, 마이그레이션 012)은 상품이 채소·과일·육류·수산으로
 # 분류됐을 때만 쓴다 — 이름에 "감자"가 들어간 과자(감자깡)나 "사과"가 들어간 주스에 신선식품 보관기간이
 # 붙는 걸 막는다. 가공식품 기준(식약처 참고값: 두부·햄·소시지·우유 등)은 분류와 관계없이 쓴다.
@@ -48,7 +52,8 @@ class PostgresShelfLifeLookup:
     #
     # 가공식품(fresh_item=False)은 먼저 제조사 신고 소비기한(품목제조보고)을 찾는다. 유형 규칙보다 제품에
     # 가깝기 때문이다. 신고값은 제조일 기준이라 뒤 날짜만 정하고, 앞 날짜는 같은 상품의 유형 규칙 비율
-    # (예: 과자 36/81)로 줄인다. 유형 규칙이 없으면 앞 날짜는 기준일 당일이다.
+    # (예: 과자 36/81)로 줄인다. 유형 규칙이 없으면 식약처 참고값 유형들의 중앙 비율(_DEFAULT_REMAINING_RATIO)을 쓴다.
+    # 앞 날짜를 기준일 당일로 두면 앱 카드에 "오늘"이 기한처럼 보였다(dev 2026-11-12, 진비빔면).
     async def find(self, normalized_ingredient_name: str, storage_type: str, fresh_item: bool = True) -> ShelfLifeEstimate | None:
         cache_key = f"{normalized_ingredient_name}\x1f{storage_type}\x1f{fresh_item}"
         rule = await self._cache.get_or_load(cache_key, lambda: self._query(normalized_ingredient_name, storage_type, fresh_item))
@@ -64,7 +69,11 @@ class PostgresShelfLifeLookup:
         if product.duration_days is None or (fresh_item and product.match_kind != "EXACT"):
             return rule
         days = product.duration_days
-        min_days = round(days * rule.duration_min_days / rule.duration_max_days) if rule and rule.duration_max_days > 0 else 0
+        if rule and rule.duration_max_days > 0:
+            ratio, ratio_basis = rule.duration_min_days / rule.duration_max_days, "같은 유형 규칙의 비율"
+        else:
+            ratio, ratio_basis = _DEFAULT_REMAINING_RATIO, "식약처 참고값 17개 유형 비율의 중앙값"
+        min_days = round(days * ratio)
         return ShelfLifeEstimate(
             rule_id=0,
             duration_min_days=min(min_days, days),
@@ -74,7 +83,7 @@ class PostgresShelfLifeLookup:
             evidence_id=f"food-safety-i1250:{product.matched_product_name}",
             assumption=(
                 f"제조사 신고 소비기한은 제조일 기준이며 제조일을 알 수 없어 {product.matched_product_name}"
-                f"({product.item_type}) 신고값 {days}일을 상한으로 사용"
+                f"({product.item_type}) 신고값 {days}일을 상한, {ratio_basis}({ratio:.2f})로 줄인 {min_days}일을 하한으로 사용"
             ),
         )
 
